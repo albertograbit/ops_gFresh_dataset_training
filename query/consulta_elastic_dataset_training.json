@@ -1,0 +1,36 @@
+{
+  "index":"device_transaction-*",
+  "query_body":{"size": 1000,
+    "query": {
+      "bool": {
+        "must": [
+          {
+            "terms": {
+              "transaction_metric.keyword": ["WSPROCESSCOMPLETED03","GFRSUSERPROCESSCOM03","WSREFERENCEIMAGEAC01"]
+            }
+          },  
+          {
+            "terms": {
+              "deployment_id": [130]
+            }
+          },                   
+          {
+            "range": {
+              "transaction_start_time": {
+                "gte": "now-90d/d",
+                "lt": "now+d/d"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "sort": [
+      {
+        "transaction_start_time": {
+          "order": "asc"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,92 @@
+# Dataset Manager - Archivos sensibles y temporales
+
+# Variables de entorno con credenciales
+.env
+
+# Archivos de credenciales
+config/credentials/
+## Solo credenciales JSON sensibles
+config/credentials/*.json
+
+# Logs
+logs/
+*.log
+
+# Archivos temporales
+temp/
+results/
+*.tmp
+*.temp
+
+# Archivos de salida
+output/
+
+# Scripts de debug y ayuda temporales
+analyze_*.py
+check_*.py
+debug_*.py
+explore_*.py
+find_*.py
+fix_*.py
+test_*.py
+ejemplo_*.py
+*_temp.py
+*_debug.py
+*_test.py
+
+# Archivos temporales de Excel
+~$*.xlsx
+~$*.xls
+## Archivos Excel/CSV generados (permitimos CSV de config si existieran)
+*_summary_*.csv
+folder_structure_*.csv
+datasets_*.csv
+*.xlsx
+
+# Entorno virtual
+venv/
+env/
+.venv/
+
+# Cache de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Archivos de configuración específicos del usuario
+config_local.yaml
+settings_local.yaml

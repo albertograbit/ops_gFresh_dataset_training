@@ -1,0 +1,55 @@
+# Configuración de parámetros del Dataset Manager
+
+# Elasticsearch y Base de Datos
+elasticsearch:
+  config_path: "config/credentials/credentials_elastic_prod.json"
+  index_pattern: "device_transaction-*"
+  transaction_metrics:
+    - "WSPROCESSCOMPLETED03"
+    - "GFRSUSERPROCESSCOM03"
+    - "WSREFERENCEIMAGEAC01"
+  max_results: 10000
+  scroll_timeout: "5m"
+
+database:
+  env_file: ".env"
+  connection_timeout: 30
+
+# Análisis de referencias
+reference_analysis:
+  min_appearances: 50  # Mínimo número de apariciones para considerar una referencia
+  confidence_threshold: 0.70  # Umbral de confianza para sugerir asignación de clase (70%)
+  top_suggestions: 3  # Número de sugerencias principales a mostrar
+
+# Descarga de imágenes
+image_download:
+  images_per_class: 50  # Número de imágenes a descargar por clase
+  output_directory: "output/images"
+  supported_formats: ["jpg", "jpeg", "png"]
+  max_image_size_mb: 10
+
+# Generación de informes
+reports:
+  output_directory: "output/reports"
+  excel_filename: "dataset_analysis_{deployment_id}_{timestamp}.xlsx"
+  new_references_filename: "new_references_{deployment_id}_{timestamp}.xlsx"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/dataset_manager.log"
+  max_file_size_mb: 100
+  backup_count: 5
+
+# Alertas y validaciones
+alerts:
+  enable_inconsistency_alerts: true
+  enable_email_notifications: false
+  email_recipients: []
+
+# Procesamiento de datos
+processing:
+  chunk_size: 1000  # Tamaño del chunk para procesamiento por lotes
+  parallel_workers: 4  # Número de workers para procesamiento paralelo
+  memory_limit_gb: 8  # Límite de memoria para el procesamiento

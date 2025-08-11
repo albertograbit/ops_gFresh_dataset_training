@@ -1,0 +1,105 @@
+# Configuración del Dataset Manager
+# Este archivo contiene configuraciones que NO incluyen credenciales sensibles
+
+# Configuración de deployment
+deployment:
+  default_days_back: 3
+  max_days_back: 365
+  batch_size: 1000
+
+# Configuración de Elasticsearch (sin credenciales)
+elasticsearch:
+  timeout: 30
+  max_retries: 3
+  retry_on_timeout: true
+  max_results: 10000
+  transaction_metrics: ["WSPROCESSCOMPLETED03", "GFRSUSERPROCESSCOM03","WSREFERENCEIMAGEAC01"]
+  index_pattern: "device_transaction-*"
+  scroll_timeout: "5m"
+
+# Configuración de base de datos (sin credenciales)
+database:
+  charset: "utf8mb4"
+  autocommit: true
+  connect_timeout: 10
+
+# Configuración de rutas
+paths:
+  base_output_dir: "./output"
+  base_log_dir: "./logs"
+  temp_dir: "./temp"
+  credentials_dir: "./config/credentials"
+
+# Configuración de archivos
+files:
+  elastic_query_template: "./query/consulta_elastic_dataset_training.json"
+  elastic_credentials: "./config/credentials/credentials_elastic_prod.json"
+
+# Configuración para procesamiento de imágenes
+image_processing:
+  max_workers: 5
+  timeout_seconds: 10
+  retry_attempts: 3
+  supported_formats: ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+  max_file_size_mb: 50
+
+# Configuración para revisión de imágenes
+image_review:
+  num_imagenes_revision: 10
+  tipo_transacciones: "ambas"  # "cliente", "manuales", "ambas"
+  tipo_imagenes_bajar: "clase_y_similares"  # "solo_clase", "clase_y_similares"
+  clear_output_folder: true
+  carpeta_destino: "./output/revisar_imagenes"
+  s3_bucket: "grabit-data"
+  s3_region: "eu-west-2"
+  download_timeout: 30
+  max_retries: 3
+  image_extensions: [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]
+
+# Configuración para dataset
+dataset:
+  num_imagenes_dataset_default: 150
+  devices_incluir_default: "todos"  # "todos", "devices_seleccionados"
+  min_transacciones_cliente: 150  # Mínimo de transacciones de cliente para incluir en dataset
+  color_columnas_especiales: "#87CEEB"  # Color azul claro para columnas especiales
+  opciones_devices_incluir: ["todos", "devices_seleccionados"]
+  opciones_si_no: ["sí", "no"]  # Opciones para dropdowns sí/no
+  num_imagenes_dataset_adicionales_default: 0  # Valor por defecto para imágenes adicionales en devices
+
+# Configuración de Excel
+excel:
+  max_rows_per_sheet: 1000000
+  include_charts: false
+  freeze_header_row: true
+
+# Configuración de logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_rotation: true
+  max_log_files: 5
+  max_log_size_mb: 10
+
+# Configuración de email
+email:
+  enabled: false
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  username: ""
+  password: ""
+  use_tls: true
+  from_address: ""
+  to_addresses: []
+
+# Configuración de análisis
+analysis:
+  min_confidence_threshold: 0.7
+  max_suggestions_per_reference: 10
+  similarity_threshold: 0.8
+  ignore_case: true
+
+# Configuración específica para análisis de referencias
+reference_analysis:
+  min_appearances: 3
+  confidence_threshold: 0.7
+  top_suggestions: 5

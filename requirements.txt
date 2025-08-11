@@ -1,0 +1,57 @@
+# Requirements para Dataset Manager
+# Herramienta de gestión de datasets para modelos de clasificación de productos retail
+
+# Core dependencies
+pandas>=2.3.0
+numpy>=2.3.0
+python-dotenv>=1.1.0
+
+# Excel handling
+openpyxl>=3.1.0
+
+# YAML configuration
+PyYAML>=6.0.2
+
+# Database connectivity
+mysql-connector-python>=9.4.0
+
+# Elasticsearch - IMPORTANTE: Usar versión 7.x para compatibilidad con cluster
+elasticsearch>=7.17.9,<8.0.0
+elastic-transport>=8.17.0
+
+# HTTP requests for image downloads
+requests>=2.32.0
+urllib3>=1.26.20
+
+# Image processing
+Pillow>=11.3.0
+boto3>=1.34.0
+
+# Progress bars for CLI
+tqdm>=4.67.0
+
+# Date/time utilities
+python-dateutil>=2.9.0
+
+# Time zones
+pytz>=2025.2
+
+# SSL certificates
+certifi>=2025.7.0
+
+# Character encoding detection
+charset-normalizer>=3.4.0
+
+# Windows console color support
+colorama>=0.4.6
+
+# Development dependencies (opcional para desarrollo local)
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=5.0.0
+# mypy>=0.991
+
+# Notas importantes:
+# - elasticsearch 7.17.9 es requerida para compatibilidad con el cluster Elasticsearch 8.x
+# - Las versiones están basadas en las probadas y funcionando en el entorno
+# - argparse y concurrent.futures son built-in en Python 3.2+, no necesitan instalación

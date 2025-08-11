@@ -35,9 +35,8 @@ def create_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos de uso:
-  %(prog)s analyze 122 --days-back 30
-    %(prog)s download_info 122 --config config/settings.yaml
-    %(prog)s status --config config/settings.yaml
+  %(prog)s download_info 122 --days-back 30
+  %(prog)s status --config config/settings.yaml
   %(prog)s download_info 122 --min-appearances 100 --confidence 0.8
   %(prog)s review_images -e path/to/excel_file.xlsx
   %(prog)s create_dataset --dry-run
@@ -319,34 +318,6 @@ def setup_custom_settings(args, base_settings):
         custom_settings['reports']['output_directory'] = os.path.join(args.output_dir, 'reports')
     
     return custom_settings
-
-def handle_analyze_command(args):
-    """Maneja el comando analyze"""
-    print(f"Iniciando análisis para deployment {args.deployment_id}")
-    
-    try:
-        # Inicializar procesador
-        processor = DatasetProcessor(config_path=args.config)
-        
-        # Ejecutar análisis
-        results = processor.process_analysis_only(
-            deployment_id=args.deployment_id,
-            days_back=args.days_back,
-            model_id=getattr(args, 'model', None)
-        )
-        
-        # Mostrar resumen
-        print("\nAnálisis completado exitosamente")
-        print_analysis_summary(results)
-        
-        return 0
-        
-    except Exception as e:
-        print(f"\nError durante el análisis: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
-        return 1
 
 def handle_download_info_command(args):
     """Maneja el comando download_info"""
@@ -853,17 +824,6 @@ def handle_review_images_command(args):
             traceback.print_exc()
         return 1
 
-def print_analysis_summary(results):
-    """Imprime resumen del análisis"""
-    summary = results.get('summary', {})
-    
-    print(f"\nRESUMEN DEL ANÁLISIS:")
-    print(f"   • Registros Elasticsearch: {summary.get('data_extraction', {}).get('elastic_records', 0):,}")
-    print(f"   • Referencias procesadas: {summary.get('data_extraction', {}).get('references', 0):,}")
-    print(f"   • Sin asignar: {summary.get('reference_analysis', {}).get('unassigned_count', 0):,}")
-    print(f"   • No entrenadas: {summary.get('reference_analysis', {}).get('untrained_count', 0):,}")
-    print(f"   • Sugerencias alta confianza: {summary.get('reference_analysis', {}).get('high_confidence_suggestions', 0):,}")
-
 def print_processing_summary(results):
     """Imprime resumen del procesamiento completo"""
     summary = results.get('summary', {})
@@ -914,9 +874,7 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     # Ejecutar comando correspondiente
-    if args.command == 'analyze':
-        return handle_analyze_command(args)
-    elif args.command == 'download_info':
+    if args.command == 'download_info':
         return handle_download_info_command(args)
     elif args.command == 'status':
         return handle_status_command(args)

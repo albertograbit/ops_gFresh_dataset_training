@@ -1,6 +1,6 @@
 # Dataset Manager gFresh
 
-CLI para analizar datos operativos, generar informes y gestionar el ciclo de vida de datasets (creación, fusión, resumen y registro en S3).
+CLI para descargar datos de inferencia, generar informes y gestionar el ciclo de vida de datasets (creación, fusión, resumen y registro en S3).
 
 ## 🎯 Objetivo
 
@@ -10,58 +10,12 @@ Automatizar selección y preparación de imágenes de producción para entrenar 
 
 `dataset_manager/` contiene los módulos internos (extracción, análisis, creación de datasets, descarga de imágenes y reporting) expuestos vía `main.py`.
 
-## 🚀 Funcionalidades
+## 🚀 Principales Capacidades
 
-### 🔍 Análisis
-
-- **Detección inteligente** de clases nuevas o no entrenadas
-- **Análisis de devices** con métricas de rendimiento individuales
-- **Identificación automática** de referencias sin `label_id` asignado
-- **Cálculo de métricas** de % Ok del sistema y % Ok del modelo
-- **Verificación de consistencia** con alertas automáticas
-- **Análisis de dispositivos** con seguimiento de performance por device
-
-### 🛠️ Procesamiento
-
-- **Descarga automática** de datos de inferencia desde Elasticsearch
-- **Extracción completa** de tablas `reference`, `label` y `model` desde BD
-- **Identificación automática** del modelo activo en producción
-- **Filtrado inteligente** por número mínimo de apariciones
-- **Soporte para múltiples deployments** con gestión independiente
-
-### 📈 Informes
-
-**Excel principal** con múltiples pestañas especializadas:
-
-- **`Resumen`**: Dashboard ejecutivo con métricas clave
-- **`Datos_Elasticsearch`**: Datos raw de Elastic con toda la información
-- **`References`**: Análisis completo de referencias con porcentajes Ok
-- **`Devices`**: Análisis detallado por device con métricas individuales
-- **`Labels`**: Información de etiquetas y clasificaciones
-- **`Model_Data`**: Información del modelo expandida y configuración
-- **`Consistencia`**: Verificaciones de integridad y alertas
-
-### 🖼️ Revisión de Imágenes
-
-**Nueva funcionalidad avanzada para descarga selectiva de imágenes:**
-
-- **Descarga automática** de imágenes para referencias marcadas para revisión
-- **Descarga de imágenes de devices** para análisis de rendimiento por dispositivo
-- **Organización inteligente** por carpetas:
-  - `productos/` → Imágenes de referencias de productos
-  - `devices/{device_id}/` → Imágenes específicas por device
-- **Logs detallados** en hojas Excel separadas:
-  - `revisar_imagenes_bajadas` → Log detallado de referencias
-  - `devices_imagenes_bajadas` → Log detallado de devices
-- **Modo dry-run** para simulación sin descarga real
-- **Selección inteligente** de transacciones representativas
-
-### 🔄 Procesos
-
-- **Sistema de procesos independientes** con metadata completa
-- **Tracking automático** de configuraciones y resultados
-- **Logs detallados** por proceso con timestamps
-- **Reutilización** de configuraciones y datos entre sesiones
+1. Descarga y consolidación de datos (Elastic + MySQL) en un Excel multi‑pestaña.
+2. Marcado y descarga selectiva de imágenes (referencias y devices) con modo dry‑run.
+3. Creación estructurada de datasets (clase/label_id) y operaciones auxiliares: merge, summary, registro en S3.
+4. Gestión de procesos aislados (cada ejecución crea un directorio auto‑contenedor con logs, datos, imágenes y reports).
 
 ## 📦 Instalación
 
@@ -134,20 +88,19 @@ python main.py folder_structure
 
 ## 📜 Comandos
 
-| Comando | Descripción | Parámetros clave |
-|---------|-------------|------------------|
-| `analyze <deployment_id>` | Extrae y analiza (sin Excel, sin imágenes). | `--days-back`, `--confidence`, `--min-appearances` |
-| `download_info <deployment_id>` | Pipeline completo (datos + Excel). | `--days-back`, `--process-name`, filtros |
-| `active-process` | Ver / listar / set / limpiar proceso activo. | `--list`, `--clear`, `--set` |
-| `status` | Estado y configuración. |  |
-| `review_images` | Descarga imágenes (referencias + devices) marcadas. | `--dry-run`, `-e <excel>` |
-| `create_dataset` | Construye dataset (clase/label_id) desde Excel del proceso. | `--fast`, límites, `--no-filter-used` |
-| `folder_structure` | CSV con carpetas hoja y conteo de imágenes. | `--input`, `--output` |
-| `merge_datasets` | Une varios datasets en uno nuevo. | interactivo |
-| `summary_dataset` | Genera `_summary_<dataset>.csv` cruzando imágenes con Excel. | `-d <dataset>` |
-| `register_dataset` | ZIP + S3 + registro CSV + opcional subir datasets.csv a S3. | `-d`, `--s3-base`, `--registry-csv` |
+| Comando | Descripción breve |
+|---------|-------------------|
+| `download_info <deployment_id>` | Descarga datos + genera Excel. |
+| `active-process` | Gestiona proceso activo (listar, set, clear). |
+| `status` | Muestra configuración y paths. |
+| `review_images` | Descarga imágenes marcadas (productos + devices). |
+| `create_dataset` | Crea estructura de dataset desde Excel. |
+| `folder_structure` | CSV con carpetas hoja e imágenes. |
+| `merge_datasets` | Fusiona varios datasets. |
+| `summary_dataset` | CSV resumen cruzando imágenes con datos. |
+| `register_dataset` | ZIP + S3 + registro en CSV global. |
 
-Comandos eliminados: `crear_dataset`, `review_devices`, `folder`, `validate-config`, `process`.
+Parámetros clave (según comando): `--days-back`, `--confidence`, `--min-appearances`, `--process-name`, `--fast`, `--limit-refs`, `--images-per-ref`, `--dry-run`, `--no-filter-used`.
 
 ### Ejemplos
 
@@ -255,38 +208,14 @@ image_review:
   s3_region: "eu-west-2"                # Región de S3
 ```
 
-## 🔧 Flujo RecomENDADO
+## 🔧 Flujo Resumido
 
-### 1. Análisis Inicial
-
-```bash
-# Generar análisis completo
-python main.py download_info 125 --days-back 7
-
-# Revisar archivo Excel generado
-# Marcar referencias/devices para revisión
-```
-
-### 2. Revisión de Imágenes
-
-```bash
-# Simular descarga primero
-python main.py review_images --dry-run
-
-# Descargar imágenes reales
-python main.py review_images
-
-# Revisar imágenes descargadas en:
-# output/processes/dataset_125_*/images/productos/
-# output/processes/dataset_125_*/images/devices/
-```
-
-### 3. Análisis de Resultados
-
-- Revisar logs detallados en las pestañas de Excel
-- Analizar métricas de rendimiento por device
-- Identificar patrones en las imágenes descargadas
-- Tomar decisiones sobre inclusión en dataset
+1. `download_info <deployment_id>` → genera proceso + Excel.
+2. Marcar en Excel referencias/devices con `revisar_imagenes=si`.
+3. `review_images` (dry‑run opcional, luego real).
+4. `create_dataset` (opcional `--fast`).
+5. `summary_dataset` y/o `merge_datasets` si hace falta combinar.
+6. `register_dataset` para ZIP + S3 + registro.
 
 ## 🔒 Seguridad
 
@@ -353,15 +282,11 @@ Los logs detallados se guardan en:
 
 ## 🔄 Cambios Clave
 
-| Función | Estado |
-|---------|--------|
-| Renombrado `crear_dataset` → `create_dataset` | ✅ |
-| `review_devices` integrado en `review_images` | ✅ |
-| Nuevos: `folder_structure`, `merge_datasets`, `summary_dataset`, `register_dataset` | ✅ |
-| Progreso ZIP y subida S3 en registro | ✅ |
-| Subida opcional de `datasets.csv` a S3 | ✅ |
-| Manejo de Excel corrupto / permisos (logs y merges) | ✅ |
-| Columnas enriquecidas (origen, dataset_original, relative_folder, filename) | ✅ |
+- Renombrado `crear_dataset` → `create_dataset`.
+- Integrado `review_devices` en `review_images`.
+- Añadidos: `folder_structure`, `merge_datasets`, `summary_dataset`, `register_dataset`.
+- Registro de datasets con progreso de ZIP y subida S3 opcional.
+- Manejo robusto de Excel (permisos, corrupción parcial) y columnas enriquecidas.
 
 ## 🛠️ Desarrollo
 
@@ -393,7 +318,7 @@ python -m pytest tests/ -v
 ---
 
 ---
-Autor: Alberto Gómez · Versión 2.1.0 · Agosto 2025
+Autor: Alberto Gómez · Versión 2.1.1 · Agosto 2025
 
 ## 🗂️ Publicación en GitHub
 

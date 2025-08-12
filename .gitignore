@@ -2,6 +2,10 @@
 .env
 config/credentials/credentials_elastic_prod.json
 config/credentials/*.json
+
+config/*.json
+config/active_process.json
+
 # Dataset Manager - Archivos sensibles y temporales
 
 # Variables de entorno con credenciales
@@ -97,4 +101,3 @@ config_local.yaml
 settings_local.yaml
 
 
-config/active_process.json

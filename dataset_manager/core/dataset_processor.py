@@ -116,10 +116,10 @@ class DatasetProcessor:
             if not isinstance(deployment_id, int) or deployment_id <= 0:
                 raise ValueError(f"deployment_id debe ser un entero positivo, recibido: {deployment_id}")
             
-            # Validar configuración de Elasticsearch
-            elastic_config_path = self.settings.get_elasticsearch_config_path()
-            if not os.path.exists(elastic_config_path):
-                raise FileNotFoundError(f"Archivo de configuración de Elasticsearch no encontrado: {elastic_config_path}")
+            # Validación de Elasticsearch basada en variables de entorno (archivo deprecated)
+            elastic_creds = self.settings.get_elasticsearch_credentials()
+            if not elastic_creds.get('host'):
+                raise ValueError("ELASTIC_HOST no definido en el entorno (.env / --env)")
             
             # Validar configuración de base de datos (variables de entorno)
             try:

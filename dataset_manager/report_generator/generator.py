@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import json
+from utils.excel_validations import ensure_dropdown_validations
 
 # Verificar disponibilidad de openpyxl
 try:
@@ -265,18 +266,14 @@ class ReportGenerator:
                 self.logger.warning(f"Archivo Excel no accesible: {error_msg}")
                 excel_path = self._handle_excel_file_conflict(excel_path)
             
-            # Crear libro de Excel
+            # Crear libro de Excel (usa helper para garantizar persistencia de columnas especiales antes de cerrar)
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 
                 # 1. Pestaña Resumen
                 self._create_summary_sheet(writer, extracted_data, analysis_results, 
                                          download_results, deployment_id)
                 
-                # 2. Pestaña Datos Elasticsearch
-                if not extracted_data['elastic_data'].empty:
-                    extracted_data['elastic_data'].to_excel(
-                        writer, sheet_name='Datos_Elasticsearch', index=False
-                    )
+                # (Eliminado) Hoja Datos_Elasticsearch ya no se genera; datos se consumen desde elastic_data.csv externo.
                 
                 # 3. Pestaña References - Consolidada con toda la información de análisis
                 if not analysis_results['complete_analysis'].empty and not extracted_data['references_data'].empty:
@@ -322,10 +319,16 @@ class ReportGenerator:
                 # 8. Pestaña Análisis de Consistencia (corregida)
                 self._create_consistency_sheet_fixed(writer, analysis_results)
             
-            # Aplicar formato al archivo Excel
+            # Aplicar formato al archivo Excel y reforzar columnas especiales
             self._format_excel_file(excel_path)
+            self._reinforce_special_columns(excel_path)
             
             self.logger.info(f"Archivo Excel principal creado: {excel_path}")
+            # Reforzar validaciones tras cualquier escritura adicional externa
+            try:
+                ensure_dropdown_validations(excel_path)
+            except Exception as _e:
+                self.logger.debug(f"No se pudieron reforzar validaciones post-creación: {_e}")
             return excel_path
             
         except Exception as e:
@@ -665,7 +668,12 @@ class ReportGenerator:
             return result
     
     def _add_dataset_columns(self, df: pd.DataFrame) -> None:
-        """Añade las nuevas columnas para configuración del dataset"""
+        """Añade/actualiza columnas de configuración del dataset con nuevas reglas:
+        - incluir_dataset = 'si' cuando num_cliente >= mínimo (sin tilde)
+        - devices_incluir default = 'devices_seleccionados'
+        - num_imagenes_dataset solo relleno cuando incluir_dataset == 'si'
+        - Normalizar revisar_imagenes a 'si'/'no'
+        """
         try:
             # Obtener valores por defecto de la configuración
             from ..config.settings import Settings
@@ -675,45 +683,43 @@ class ReportGenerator:
             devices_incluir_default = getattr(settings.dataset, 'devices_incluir_default', 'todos')
             min_transacciones = getattr(settings.dataset, 'min_transacciones_cliente', 150)
             
-            # Lógica de negocio para incluir_dataset
-            # 'sí' si tiene el mínimo de transacciones (independiente de si está en modelo actual)
+            # Lógica incluir_dataset
             if 'num_cliente' in df.columns:
                 # Asegurar que num_cliente es numérico
                 df['num_cliente'] = pd.to_numeric(df['num_cliente'], errors='coerce').fillna(0)
-                
-                # incluir_dataset = 'sí' si cumple mínimo de transacciones
-                df['incluir_dataset'] = (df['num_cliente'] >= min_transacciones).map({True: 'sí', False: 'no'})
+                df['incluir_dataset'] = (df['num_cliente'] >= min_transacciones).map({True: 'si', False: 'no'})
             else:
                 df['incluir_dataset'] = 'no'
             
-            # Añadir columna devices_incluir con valor por defecto
-            df['devices_incluir'] = devices_incluir_default
+            # devices_incluir default forzado a devices_seleccionados
+            df['devices_incluir'] = 'devices_seleccionados'
             
-            # Añadir columna num_imagenes_dataset con valor por defecto
-            df['num_imagenes_dataset'] = num_imagenes_default
+            # num_imagenes_dataset sólo cuando se incluye
+            df['num_imagenes_dataset'] = df['incluir_dataset'].apply(lambda v: num_imagenes_default if v == 'si' else '')
             
             # Nuevas columnas al final: producto_a_entrenar y label_considerar
             # Solo tienen valor cuando incluir_dataset = 'sí'
             df['producto_a_entrenar'] = df.apply(
-                lambda row: row.get('producto_trained', '') if row.get('incluir_dataset') == 'sí' else '',
+                lambda row: row.get('producto_trained', '') if row.get('incluir_dataset') == 'si' else '',
                 axis=1
             )
             
             df['label_considerar'] = df.apply(
-                lambda row: row.get('label_id', '') if row.get('incluir_dataset') == 'sí' else '',
+                lambda row: row.get('label_id', '') if row.get('incluir_dataset') == 'si' else '',
                 axis=1
             )
             
             # Asegurar que revisar_imagenes solo tenga valores 'sí' o 'no'
             if 'revisar_imagenes' in df.columns:
                 df['revisar_imagenes'] = df['revisar_imagenes'].map({
-                    True: 'sí', 
+                    True: 'si', 
                     False: 'no',
-                    'True': 'sí',
+                    'True': 'si',
                     'False': 'no',
-                    'sí': 'sí',
+                    'sí': 'si',
+                    'si': 'si',
                     'no': 'no',
-                    1: 'sí',
+                    1: 'si',
                     0: 'no'
                 }).fillna('no')
             
@@ -952,67 +958,100 @@ class ReportGenerator:
             # Convertir color hex a código para openpyxl (sin #)
             color_code = color_especial.replace('#', '') if color_especial.startswith('#') else color_especial
             
-            workbook = openpyxl.load_workbook(excel_path)
-            
-            # Formato básico para todas las hojas
-            header_font = Font(bold=True, color="FFFFFF")
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            
-            # Formato específico para columnas especiales (azul claro con texto negro)
-            special_font = Font(color="000000")  # Texto negro para mejor legibilidad
-            special_fill = PatternFill(start_color=color_code, end_color=color_code, fill_type="solid")
-            
-            # Columnas que deben tener formato especial
-            special_columns = ['revisar_imagenes', 'incluir_dataset', 'devices_incluir', 'num_imagenes_dataset', 'producto_a_entrenar', 'label_considerar', 'num_imagenes_dataset_adicionales']
-            
-            for sheet_name in workbook.sheetnames:
-                sheet = workbook[sheet_name]
-                
-                # Formato de cabeceras (primera fila)
-                if sheet.max_row > 0:
-                    # Obtener los nombres de las columnas
-                    header_row = list(sheet[1])
-                    column_names = [cell.value for cell in header_row]
-                    
-                    for i, cell in enumerate(header_row):
-                        cell.font = header_font
-                        cell.fill = header_fill
-                        cell.alignment = Alignment(horizontal="center")
-                    
-                    # Aplicar formato especial a columnas específicas en References y Devices
-                    if sheet_name in ['References', 'Devices'] and sheet.max_row > 1:
-                        for col_idx, col_name in enumerate(column_names):
-                            if col_name in special_columns:
-                                column_letter = get_column_letter(col_idx + 1)
-                                
-                                # Aplicar formato especial a todas las celdas de la columna (excepto header)
-                                for row_num in range(2, sheet.max_row + 1):
-                                    cell = sheet[f'{column_letter}{row_num}']
-                                    cell.font = special_font
-                                    cell.fill = special_fill
-                
-                # Ajustar ancho de columnas
-                for column in sheet.columns:
-                    max_length = 0
-                    column_letter = column[0].column_letter
-                    
-                    for cell in column:
-                        try:
-                            if len(str(cell.value)) > max_length:
-                                max_length = len(str(cell.value))
-                        except:
-                            pass
-                    
-                    adjusted_width = min(max_length + 2, 50)  # Máximo 50 caracteres
-                    sheet.column_dimensions[column_letter].width = adjusted_width
-            
-            # Crear hoja de validación para dropdowns
-            self._add_validation_sheet(workbook)
-            
-            workbook.save(excel_path)
+            # Usar ReportExcelManager para asegurar prompts de bloqueo y preservación de dropdowns
+            from utils.report_excel_manager import ReportExcelManager
+
+            def _apply_formatting(wb):
+                # Formato básico para todas las hojas
+                header_font = Font(bold=True, color="FFFFFF")
+                header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+
+                # Formato específico para columnas especiales (azul claro con texto negro)
+                special_font = Font(color="000000")  # Texto negro para mejor legibilidad
+                special_fill = PatternFill(start_color=color_code, end_color=color_code, fill_type="solid")
+
+                # Columnas que deben tener formato especial
+                special_columns = ['revisar_imagenes', 'incluir_dataset', 'devices_incluir', 'num_imagenes_dataset', 'producto_a_entrenar', 'label_considerar', 'num_imagenes_dataset_adicionales']
+
+                for sheet_name in wb.sheetnames:
+                    sheet = wb[sheet_name]
+
+                    # Formato de cabeceras (primera fila)
+                    if sheet.max_row > 0:
+                        header_row = list(sheet[1])
+                        column_names = [cell.value for cell in header_row]
+
+                        for cell in header_row:
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.alignment = Alignment(horizontal="center")
+
+                        # Aplicar formato especial a columnas específicas en References y Devices
+                        if sheet_name in ['References', 'Devices'] and sheet.max_row > 1:
+                            for col_idx, col_name in enumerate(column_names):
+                                if col_name in special_columns:
+                                    column_letter = get_column_letter(col_idx + 1)
+                                    for row_num in range(2, sheet.max_row + 1):
+                                        cell = sheet[f'{column_letter}{row_num}']
+                                        cell.font = special_font
+                                        cell.fill = special_fill
+
+                    # Ajustar ancho de columnas
+                    for column in sheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except Exception:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        sheet.column_dimensions[column_letter].width = adjusted_width
+
+                # Crear / refrescar hoja de validación para dropdowns
+                self._add_validation_sheet(wb)
+
+            ReportExcelManager(excel_path, interactive=True).save_with_validations(_apply_formatting)
             
         except Exception as e:
             self.logger.warning(f"Error aplicando formato a Excel: {e}")
+
+    def _reinforce_special_columns(self, excel_path: str):
+        """Asegura que las columnas especiales (dropdown) existen y tipos correctos incluso tras ediciones.
+        Evita que Excel/usuarios eliminen accidentalmente encabezados críticos."""
+        try:
+            from ..config.settings import Settings
+            settings = Settings()
+            special_columns = ['revisar_imagenes', 'incluir_dataset', 'devices_incluir', 'num_imagenes_dataset', 'producto_a_entrenar', 'label_considerar', 'num_imagenes_dataset_adicionales']
+            import openpyxl
+            from utils.report_excel_manager import ReportExcelManager
+
+            def _reinforce(wb):
+                changed_local = False
+                if 'References' in wb.sheetnames:
+                    ws = wb['References']
+                    headers = [c.value for c in ws[1]]
+                    for col in special_columns:
+                        if col not in headers:
+                            ws.cell(row=1, column=len(headers)+1, value=col)
+                            headers.append(col)
+                            changed_local = True
+                if 'Devices' in wb.sheetnames:
+                    ws = wb['Devices']
+                    headers = [c.value for c in ws[1]]
+                    for col in ['revisar_imagenes','incluir_dataset','num_imagenes_dataset_adicionales']:
+                        if col not in headers:
+                            ws.cell(row=1, column=len(headers)+1, value=col)
+                            headers.append(col)
+                            changed_local = True
+                # No necesidad de actuar si no hubo cambios; manager guardará igual para refrescar validaciones
+                if changed_local:
+                    self.logger.info("Columnas especiales reforzadas en Excel")
+
+            ReportExcelManager(excel_path, interactive=True).save_with_validations(_reinforce)
+        except Exception as e:
+            self.logger.debug(f"No se pudo reforzar columnas especiales: {e}")
     
     def _add_validation_sheet(self, workbook):
         """Añade una hoja oculta con valores de validación para dropdowns"""
@@ -1020,7 +1059,7 @@ class ReportGenerator:
             from ..config.settings import Settings
             settings = Settings()
             opciones_devices = getattr(settings.dataset, 'opciones_devices_incluir', ['todos', 'devices_seleccionados'])
-            opciones_si_no = getattr(settings.dataset, 'opciones_si_no', ['sí', 'no'])
+            opciones_si_no = ['si', 'no']
             
             # Crear hoja de validación (oculta)
             if 'Validacion' in workbook.sheetnames:
@@ -1203,21 +1242,21 @@ class ReportGenerator:
             # Normalizar revisar_imagenes a 'sí'/'no'
             if 'revisar_imagenes' in devices_df_enhanced.columns:
                 devices_df_enhanced['revisar_imagenes'] = devices_df_enhanced['revisar_imagenes'].map({
-                    True: 'sí', 
+                    True: 'si', 
                     False: 'no',
-                    'True': 'sí',
+                    'True': 'si',
                     'False': 'no',
-                    'si': 'sí',
+                    'si': 'si',
+                    'sí': 'si',
                     'no': 'no',
-                    'sí': 'sí',
-                    1: 'sí',
+                    1: 'si',
                     0: 'no'
                 }).fillna('no')
             else:
                 devices_df_enhanced['revisar_imagenes'] = 'no'
             
             # Añadir columna incluir_dataset (por defecto 'sí')
-            devices_df_enhanced['incluir_dataset'] = 'sí'
+            devices_df_enhanced['incluir_dataset'] = 'si'
             
             # Añadir columna num_imagenes_dataset_adicionales (valor configurable, por defecto 0)
             devices_df_enhanced['num_imagenes_dataset_adicionales'] = num_imagenes_adicionales_default
@@ -1225,6 +1264,14 @@ class ReportGenerator:
             # Ordenar por número de transacciones de cliente
             devices_df_sorted = devices_df_enhanced.sort_values('num_cliente', ascending=False)
             
+            # Asegurar columna first_transaction_date si falta
+            if 'first_transaction_date' not in devices_df_sorted.columns:
+                devices_df_sorted['first_transaction_date'] = ''
+            # Convertir first_transaction_date a datetime y formatear como fecha (YYYY-MM-DD)
+            try:
+                devices_df_sorted['first_transaction_date'] = pd.to_datetime(devices_df_sorted['first_transaction_date'], errors='coerce').dt.date
+            except Exception:
+                pass
             devices_df_sorted.to_excel(writer, sheet_name='Devices', index=False)
             self.logger.info(f"Pestaña Devices creada con {len(devices_df_sorted)} devices")
             

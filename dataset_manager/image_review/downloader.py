@@ -16,6 +16,8 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 from urllib.parse import urlparse
+from utils.excel_validations import ensure_dropdown_validations
+from utils.report_excel_manager import ReportExcelManager, ExcelLockedError
 
 
 class ImageReviewDownloader:
@@ -33,59 +35,56 @@ class ImageReviewDownloader:
         """
         self.logger = logging.getLogger(__name__)
         self.process_aware = process_aware
-        
+
         # Cargar variables de entorno del .env
-        import os
         from dotenv import load_dotenv
         load_dotenv()
-        
+
         # Cargar configuración
         if process_aware:
             from dataset_manager.process_aware_settings import ProcessAwareSettings
             process_settings = ProcessAwareSettings(config_path)
             full_config = process_settings.get_settings()
             self.config = full_config.get('image_review', {})
-            
-            # Actualizar carpeta destino con la del proceso activo
             process_info = process_settings.get_process_info()
             if process_info and 'process_dir' in process_info:
                 process_dir = Path(process_info['process_dir'])
-                # Usar carpeta base para imágenes de revisión (productos y devices)
-                self.carpeta_destino = str(process_dir / "images")
+                self.carpeta_destino = str(process_dir / 'images')
             else:
                 self.carpeta_destino = self.config.get('carpeta_destino', './output/images')
         else:
             with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            self.config = config.get('image_review', {})
+                raw_cfg = yaml.safe_load(f)
+            self.config = raw_cfg.get('image_review', {})
             self.carpeta_destino = self.config.get('carpeta_destino', './output/images')
-        
+
+        # Parámetros generales
         self.num_imagenes = self.config.get('num_imagenes_revision', 5)
         self.tipo_transacciones = self.config.get('tipo_transacciones', 'ambas')
         self.clear_output_folder = self.config.get('clear_output_folder', True)
         self.tipo_imagenes_bajar = self.config.get('tipo_imagenes_bajar', 'clase_y_similares')
-        
-        # Configuración de S3 - priorizar variables de entorno
+
+        # S3 / credenciales
         self.s3_bucket = os.getenv('S3_BUCKET') or self.config.get('s3_bucket', 'grabit-data')
         self.s3_region = os.getenv('REMOTE_STORAGE_REGION') or self.config.get('s3_region', 'eu-west-2')
         self.aws_access_key_id = os.getenv('REMOTE_STORAGE_ACCESS_KEY')
         self.aws_secret_access_key = os.getenv('REMOTE_STORAGE_SECRET_KEY')
-        
+
         self.download_timeout = self.config.get('download_timeout', 30)
         self.max_retries = self.config.get('max_retries', 3)
         self.image_extensions = self.config.get('image_extensions', ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'])
-        self.dry_run = False  # Por defecto no es dry run
-        
-        # Lista para rastrear imágenes descargadas
+        self.dry_run = False
+
+        # Tracking
         self.downloaded_images_log = []
-        
-        # Inicializar cliente S3
+        self.last_log_save_status = None
+        self.last_log_save_error = None
+
+        # Init S3 client
         self._init_s3_client()
-        
-        # Crear carpeta de destino
         os.makedirs(self.carpeta_destino, exist_ok=True)
-        
-        self.logger.info(f"ImageReviewDownloader inicializado:")
+
+        self.logger.info("ImageReviewDownloader inicializado:")
         self.logger.info(f"  - Imágenes por referencia: {self.num_imagenes}")
         self.logger.info(f"  - Tipo de transacciones: {self.tipo_transacciones}")
         self.logger.info(f"  - Carpeta destino: {self.carpeta_destino}")
@@ -126,6 +125,23 @@ class ImageReviewDownloader:
             Ruta al archivo Excel más reciente o None si no se encuentra
         """
         try:
+            def _is_main_dataset_file(fname: str) -> bool:
+                name = os.path.basename(fname)
+                if not name.lower().endswith('.xlsx'):
+                    return False
+                if name.startswith('~$'):
+                    return False
+                low = name.lower()
+                # Excluir ficheros de registros/parciales/backup creados por review_images
+                if '_imagenes_descargadas' in low or 'backup' in low:
+                    return False
+                # Patrones válidos actuales y legacy
+                if name.startswith('dataset_'):
+                    return True
+                if 'dataset_analysis_' in name:
+                    return True
+                return False
+
             # Si hay configuración consciente de procesos, buscar primero en el proceso activo
             if self.process_aware:
                 from dataset_manager.process_aware_settings import ProcessAwareSettings
@@ -136,9 +152,8 @@ class ImageReviewDownloader:
                     # Buscar archivo Excel en el directorio del proceso activo
                     process_reports_dir = process_settings.get_output_path('reports')
                     if os.path.exists(process_reports_dir):
-                        # Filtrar archivos Excel excluyendo temporales (~$*.xlsx)
-                        excel_files = [f for f in os.listdir(process_reports_dir) 
-                                     if f.endswith('.xlsx') and not f.startswith('~$')]
+                        all_files = os.listdir(process_reports_dir)
+                        excel_files = [f for f in all_files if _is_main_dataset_file(f)]
                         if excel_files:
                             # Si hay múltiples archivos, tomar el más reciente
                             latest_file = max(excel_files, key=lambda f: os.path.getmtime(os.path.join(process_reports_dir, f)))
@@ -148,10 +163,8 @@ class ImageReviewDownloader:
             
             # Fallback: buscar en directorios de procesos
             processes_pattern = "output/processes/**/reports/*.xlsx"
-            excel_files = glob.glob(processes_pattern, recursive=True)
-            
-            # Filtrar archivos temporales de Excel
-            excel_files = [f for f in excel_files if not os.path.basename(f).startswith('~$')]
+            all_excel_candidates = glob.glob(processes_pattern, recursive=True)
+            excel_files = [f for f in all_excel_candidates if _is_main_dataset_file(f)]
             
             if excel_files:
                 latest_file = max(excel_files, key=os.path.getmtime)
@@ -190,7 +203,7 @@ class ImageReviewDownloader:
             self.logger.info(f"Cargadas {len(df)} referencias desde {excel_path}")
             
             # Filtrar solo las referencias marcadas para revisión
-            df_review = df[df['revisar_imagenes'].str.lower().isin(['si', 'sí', 'yes', 'y'])]
+            df_review = df[df['revisar_imagenes'].astype(str).str.lower().isin(['si', 'sí', 'yes', 'y'])]
             self.logger.info(f"Referencias marcadas para revisión: {len(df_review)}")
             
             return df_review
@@ -221,70 +234,28 @@ class ImageReviewDownloader:
             raise
 
     def load_elasticsearch_data(self, excel_path: str) -> pd.DataFrame:
-        """
-        Cargar datos de Elasticsearch desde el archivo procesado principal
-        
-        Args:
-            excel_path: Ruta al archivo Excel de referencias (no se usa, cargamos el procesado)
-            
-        Returns:
-            DataFrame con datos de Elasticsearch procesados
-        """
+        """Cargar datos de Elasticsearch desde CSV externo elastic_data.csv."""
         try:
-            # Con el nuevo sistema de procesos, usar los datos del Excel principal
-            # Buscar la pestaña 'Datos_Elasticsearch' en el archivo de referencias
-            if os.path.exists(excel_path):
-                self.logger.info(f"Cargando datos de Elasticsearch desde: {excel_path}")
-                
-                # Optimización: solo cargar las columnas MÍNIMAS necesarias para descarga de imágenes
-                essential_columns = [
-                    'transaction_id', 'device_id', 'device_name',
-                    'result_label_name', 'selected_reference_code', 'selected_reference_name',
-                    'Ok', 'Ok_modelo', 'image_link'
-                ]
-                
-                try:
-                    # Intentar cargar solo las columnas esenciales
-                    df = pd.read_excel(excel_path, sheet_name='Datos_Elasticsearch', usecols=essential_columns)
-                    self.logger.info(f"✅ Carga optimizada: {len(df)} registros, {len(df.columns)} columnas esenciales")
-                except ValueError as e:
-                    # Si alguna columna no existe, cargar todas y filtrar después
-                    self.logger.warning(f"No se pudieron cargar columnas específicas, cargando todas...")
-                    df = pd.read_excel(excel_path, sheet_name='Datos_Elasticsearch')
-                    # Filtrar solo las columnas que existen
-                    available_cols = [col for col in essential_columns if col in df.columns]
-                    df = df[available_cols]
-                    self.logger.info(f"✅ Carga filtrada: {len(df)} registros, {len(df.columns)} columnas disponibles")
-                
-                # Crear has_image basándose SOLO en image_link (la columna que realmente importa)
-                if 'image_link' in df.columns:
-                    df['has_image'] = (df['image_link'].notna() & 
-                                     (df['image_link'] != '') & 
-                                     (df['image_link'] != 'null') & 
-                                     (df['image_link'] != 'None'))
-                    
-                    total_with_images = df['has_image'].sum()
-                    self.logger.info(f"✅ {total_with_images} registros con URLs descargables detectados")
-                else:
-                    df['has_image'] = False
-                    self.logger.warning("❌ Columna 'image_link' no encontrada - no se pueden descargar imágenes")
-                
-                return df
-            else:
-                # Fallback al archivo legacy para compatibilidad
-                processed_file = 'results/processed_device_transactions.xlsx'
-                
-                if not os.path.exists(processed_file):
-                    self.logger.error(f"No se encontraron datos de Elasticsearch ni en {excel_path} ni en {processed_file}")
-                    raise FileNotFoundError(f"No se encontraron datos de Elasticsearch")
-                
-                self.logger.info(f"Usando archivo legacy: {processed_file}")
-                df = pd.read_excel(processed_file, sheet_name='Datos_Procesados')
-                self.logger.info(f"Cargados {len(df)} registros de Elasticsearch con datos procesados")
-                return df
-            
+            # Intentar localizar elastic_data.csv relativo al Excel (misma carpeta o carpeta padre reports)
+            excel_dir = Path(excel_path).parent
+            candidates = [excel_dir / 'elastic_data.csv', excel_dir.parent / 'elastic_data.csv']
+            for c in candidates:
+                if c.exists():
+                    df = pd.read_csv(c, sep=';', encoding='utf-8') if c.suffix.lower()=='.csv' else pd.read_csv(c)
+                    self.logger.info(f"Cargados {len(df)} registros de Elasticsearch desde {c}")
+                    # Asegurar columnas clave
+                    needed = ['transaction_id','device_id','device_name','result_label_name','selected_reference_code','selected_reference_name','Ok','Ok_modelo','image_link']
+                    missing = [col for col in needed if col not in df.columns]
+                    if missing:
+                        self.logger.warning(f"Columnas faltantes en CSV: {missing}")
+                    if 'image_link' in df.columns:
+                        df['has_image'] = (df['image_link'].notna() & (df['image_link']!='') & (df['image_link']!='null') & (df['image_link']!='None'))
+                    else:
+                        df['has_image'] = False
+                    return df
+            raise FileNotFoundError('No se encontró elastic_data.csv asociado al Excel. Ejecute primero la extracción.')
         except Exception as e:
-            self.logger.error(f"Error cargando datos de Elasticsearch: {str(e)}")
+            self.logger.error(f"Error cargando datos de Elasticsearch: {e}")
             raise
 
     def filter_transactions_by_type(self, df_elastic: pd.DataFrame) -> pd.DataFrame:
@@ -855,7 +826,7 @@ class ImageReviewDownloader:
             
             # Cargar datos de devices
             df_devices = self.load_devices_data(excel_path)
-            devices_to_process = df_devices[df_devices['revisar_imagenes'].str.lower().isin(['si', 'sí', 'yes', 'y'])]
+            devices_to_process = df_devices[df_devices['revisar_imagenes'].astype(str).str.lower().isin(['si', 'sí', 'yes', 'y'])]
             
             # Verificar si hay algo que procesar
             if len(df_references) == 0 and len(devices_to_process) == 0:
@@ -905,6 +876,21 @@ class ImageReviewDownloader:
             self.logger.info(f"  - Devices procesados: {summary['devices_processed']}")
             self.logger.info(f"  - Total imágenes descargadas: {summary['total_images']}")
             self.logger.info(f"  - Carpeta de salida: {summary['output_folder']}")
+
+            # Guardar log de imágenes descargadas en el Excel principal (o backup si está bloqueado)
+            try:
+                self._save_downloaded_images_log(excel_path)
+            except Exception as e:
+                self.logger.warning(f"No se pudo guardar log de imágenes en Excel: {e}")
+            # Informe explícito del resultado del guardado
+            if self.last_log_save_status == 'success':
+                self.logger.info("✅ Log de imágenes añadido al Excel")
+            elif self.last_log_save_status == 'locked':
+                self.logger.warning("⚠ Excel estaba abierto: cierre el archivo y vuelva a ejecutar 'review_images' para registrar el log")
+            elif self.last_log_save_status == 'no_images':
+                self.logger.info("No había imágenes nuevas para registrar en el Excel")
+            elif self.last_log_save_status == 'error':
+                self.logger.error(f"No se pudo registrar el log en Excel: {self.last_log_save_error}")
             
             return summary
             
@@ -919,66 +905,41 @@ class ImageReviewDownloader:
         Returns:
             Tuple[bool, str]: (is_accessible, error_message)
         """
+        # Estrategia robusta en Windows: intentar renombrar temporalmente. Si falla -> bloqueado.
         try:
-            # Verificar si el archivo existe
             if not os.path.exists(excel_path):
                 return True, ""
-            
-            # Intentar abrir el archivo en modo append para verificar acceso
-            import tempfile
-            
-            # Crear una copia temporal para verificar el acceso
-            test_file = excel_path + '.test_access'
+            temp_name = excel_path + ".locktest"
             try:
-                # Intentar crear un archivo de prueba en el mismo directorio
-                with open(test_file, 'w') as f:
-                    f.write('test')
-                os.remove(test_file)
-                
-                # Intentar abrir el Excel en modo lectura para verificar si está bloqueado
-                with pd.ExcelFile(excel_path, engine='openpyxl') as xls:
-                    pass
-                
+                os.rename(excel_path, temp_name)
+                os.rename(temp_name, excel_path)
                 return True, ""
-                
             except PermissionError:
-                return False, "El archivo está abierto en otra aplicación"
-            except Exception as e:
-                return False, f"Error de acceso: {str(e)}"
-                
+                return False, "El archivo está abierto en Excel (bloqueado)"
+            except OSError:
+                # Cualquier OSError aquí interpretamos como bloqueo para este caso
+                return False, "No se pudo obtener bloqueo exclusivo (posible archivo abierto)"
         except Exception as e:
-            return False, f"Error verificando acceso: {str(e)}"
+            return False, f"Error verificando acceso: {e}"
 
     def _save_downloaded_images_log(self, excel_path):
         """Guarda el registro de imágenes descargadas separando references y devices en hojas diferentes"""
-        # Verificación preventiva de acceso al archivo (no interactivo)
-        is_accessible, error_msg = self._check_excel_file_accessible(excel_path)
-        if not is_accessible:
-            self.logger.warning(f"Excel no accesible ({error_msg}). Guardando en archivo de respaldo.")
-            try:
-                backup_path = excel_path.replace('.xlsx', '_imagenes_descargadas_backup.xlsx')
-                df_downloaded = pd.DataFrame(self.downloaded_images_log)
-                df_references = df_downloaded[df_downloaded['product_type'] != 'device'].copy()
-                df_devices = df_downloaded[df_downloaded['product_type'] == 'device'].copy()
-                # Normalización de device_id si existe
-                if not df_devices.empty and 'device_id' in df_devices.columns:
-                    df_devices['device_id'] = pd.to_numeric(df_devices['device_id'], errors='coerce').astype('Int64')
-                with pd.ExcelWriter(backup_path, engine='openpyxl') as writer:
-                    if not df_references.empty:
-                        df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
-                    if not df_devices.empty:
-                        df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
-                self.logger.info(f"Registro guardado en archivo de respaldo: {backup_path}")
-            except Exception as e:
-                self.logger.error(f"Error guardando archivo de respaldo: {e}")
+        manager = ReportExcelManager(excel_path, interactive=True, max_retries=3)
+        try:
+            manager.wait_until_unlocked()
+        except ExcelLockedError as e:
+            self.logger.error(str(e))
+            self.last_log_save_status = 'locked'
+            self.last_log_save_error = str(e)
             return
         
         try:
             if not self.downloaded_images_log:
                 self.logger.info("No hay imágenes descargadas que registrar")
+                self.last_log_save_status = 'no_images'
                 return
             
-            # Convertir la lista de registros a DataFrame
+            # Construir DataFrame de registros actuales
             df_downloaded = pd.DataFrame(self.downloaded_images_log)
             
             # Separar references y devices
@@ -1004,70 +965,65 @@ class ImageReviewDownloader:
                 if 'device_id' in df_devices.columns:
                     df_devices['device_id'] = pd.to_numeric(df_devices['device_id'], errors='coerce').astype('Int64')
             
-            # Intentar escribir en el archivo Excel preservando validaciones
-            try:
-                # Verificar si el archivo existe y intentar escribir
-                if os.path.exists(excel_path):
-                    # Usar openpyxl para preservar validaciones y posicionar hojas
-                    self._save_with_validation_preservation(excel_path, df_references, df_devices)
-                else:
-                    # Crear nuevo archivo Excel
-                    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-                        if not df_references.empty:
-                            df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
-                        if not df_devices.empty:
-                            df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
-                self.logger.info(f"Registro de imágenes descargadas guardado en {excel_path}")
-                self.logger.info(f"Total de registros guardados: {len(df_downloaded)}")
-            except PermissionError as e:
-                # Guardar backup sin interacción
-                self.logger.warning(f"Excel bloqueado ({e}). Guardando registro en archivo de respaldo.")
-                backup_path = excel_path.replace('.xlsx', '_imagenes_descargadas_backup.xlsx')
-                with pd.ExcelWriter(backup_path, engine='openpyxl') as writer:
-                    if not df_references.empty:
-                        df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
-                    if not df_devices.empty:
-                        df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
-                self.logger.info(f"Registro guardado en archivo de respaldo: {backup_path}")
+            def _modify(wb):
+                # Insertar / reemplazar hojas usando openpyxl workbook
+                from openpyxl.utils.dataframe import dataframe_to_rows
+                insert_after = None
+                if 'Devices' in wb.sheetnames:
+                    insert_after = wb.sheetnames.index('Devices') + 1
+                idx = insert_after
+                if df_references is not None and not df_references.empty:
+                    if 'revisar_imagenes_bajadas' in wb.sheetnames:
+                        del wb['revisar_imagenes_bajadas']
+                    s = wb.create_sheet('revisar_imagenes_bajadas', index=idx if idx is not None else None)
+                    for r in dataframe_to_rows(df_references, index=False, header=True):
+                        s.append(r)
+                    if idx is not None:
+                        idx += 1
+                if df_devices is not None and not df_devices.empty:
+                    if 'devices_imagenes_bajadas' in wb.sheetnames:
+                        del wb['devices_imagenes_bajadas']
+                    s2 = wb.create_sheet('devices_imagenes_bajadas', index=idx if idx is not None else None)
+                    from openpyxl.utils.dataframe import dataframe_to_rows as _dtr
+                    for r in _dtr(df_devices, index=False, header=True):
+                        s2.append(r)
+            # Guardar con manager (reaplica validaciones después)
+            if not os.path.exists(excel_path):
+                # Crear un workbook base vacío para que el manager pueda operar
+                import openpyxl as _ox
+                base_wb = _ox.Workbook()
+                # Evitar hoja por defecto si vamos a insertar nuevas hojas
+                default_sheet = base_wb.active
+                base_wb.remove(default_sheet)
+                base_wb.save(excel_path)
+            # Guardar (creación o actualización) vía manager asegurando validaciones
+            manager.save_with_validations(_modify)
+            self.logger.info(f"Registro de imágenes descargadas guardado en {excel_path}")
+            self.logger.info(f"Total de registros guardados (incluyendo pendientes): {len(df_downloaded)}")
+            self.last_log_save_status = 'success'
+            self.last_log_save_error = None
             
                         
         except Exception as e:
-            self.logger.error(f"Error al guardar registro de imágenes descargadas: {e}")
-            # En caso de error, intentar guardar en un archivo de respaldo
-            try:
-                backup_path = excel_path.replace('.xlsx', '_imagenes_descargadas_backup.xlsx')
-                df_downloaded = pd.DataFrame(self.downloaded_images_log)
-                df_references = df_downloaded[df_downloaded['product_type'] != 'device'].copy()
-                df_devices = df_downloaded[df_downloaded['product_type'] == 'device'].copy()
-                
-                with pd.ExcelWriter(backup_path, engine='openpyxl') as writer:
-                    if not df_references.empty:
-                        df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
-                    if not df_devices.empty:
-                        df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
-                self.logger.info(f"Registro guardado en archivo de respaldo: {backup_path}")
-            except Exception as backup_error:
-                self.logger.error(f"Error creando archivo de respaldo: {backup_error}")
+            self.logger.error(f"Error al guardar registro de imágenes descargadas: {e}. No se crea archivo alternativo para evitar inconsistencias.")
+            self.last_log_save_status = 'error'
+            self.last_log_save_error = str(e)
 
     def _save_with_validation_preservation(self, excel_path: str, df_references: pd.DataFrame, df_devices: pd.DataFrame):
-        """
-        Guarda los DataFrames en el Excel preservando las validaciones de datos existentes
-        """
+        """Guardar hojas de log preservando validaciones existentes."""
         try:
             import openpyxl
             from openpyxl.utils.dataframe import dataframe_to_rows
             
-            # Abrir el workbook existente
-            workbook = openpyxl.load_workbook(excel_path)
-            
-            # Guardar las validaciones de datos antes de modificar
-            validations_backup = {}
-            for sheet_name in workbook.sheetnames:
-                sheet = workbook[sheet_name]
-                validations_backup[sheet_name] = []
-                if hasattr(sheet, 'data_validations'):
-                    for dv in sheet.data_validations.dataValidation:
-                        validations_backup[sheet_name].append({
+            print(1)
+            wb = openpyxl.load_workbook(excel_path)
+            backup = {}
+            for sn in wb.sheetnames:
+                sh = wb[sn]
+                backup[sn] = []
+                if hasattr(sh, 'data_validations'):
+                    for dv in getattr(sh.data_validations, 'dataValidation', []):
+                        backup[sn].append({
                             'formula1': dv.formula1,
                             'formula2': dv.formula2,
                             'type': dv.type,
@@ -1079,96 +1035,36 @@ class ImageReviewDownloader:
                             'prompt': dv.prompt,
                             'promptTitle': dv.promptTitle
                         })
-            
-            # Calcular índice de inserción inmediatamente después de 'Devices' si existe
-            insert_after_idx = None
-            if 'Devices' in workbook.sheetnames:
-                insert_after_idx = workbook.sheetnames.index('Devices') + 1
-
-            next_index = insert_after_idx
-
-            # Añadir/reemplazar las hojas de imágenes descargadas con posicionamiento
-            if not df_references.empty:
-                if 'revisar_imagenes_bajadas' in workbook.sheetnames:
-                    del workbook['revisar_imagenes_bajadas']
-                ref_sheet = workbook.create_sheet('revisar_imagenes_bajadas', index=next_index if next_index is not None else None)
+            insert_after = None
+            if 'Devices' in wb.sheetnames:
+                insert_after = wb.sheetnames.index('Devices') + 1
+            idx = insert_after
+            if df_references is not None and not df_references.empty:
+                if 'revisar_imagenes_bajadas' in wb.sheetnames:
+                    del wb['revisar_imagenes_bajadas']
+                s = wb.create_sheet('revisar_imagenes_bajadas', index=idx if idx is not None else None)
                 for r in dataframe_to_rows(df_references, index=False, header=True):
-                    ref_sheet.append(r)
-                self.logger.info(f"Guardados {len(df_references)} registros de referencias en hoja 'revisar_imagenes_bajadas'")
-                if next_index is not None:
-                    next_index += 1
-
-            if not df_devices.empty:
-                if 'devices_imagenes_bajadas' in workbook.sheetnames:
-                    del workbook['devices_imagenes_bajadas']
-                dev_sheet = workbook.create_sheet('devices_imagenes_bajadas', index=next_index if next_index is not None else None)
+                    s.append(r)
+                if idx is not None:
+                    idx += 1
+            if df_devices is not None and not df_devices.empty:
+                if 'devices_imagenes_bajadas' in wb.sheetnames:
+                    del wb['devices_imagenes_bajadas']
+                s2 = wb.create_sheet('devices_imagenes_bajadas', index=idx if idx is not None else None)
                 for r in dataframe_to_rows(df_devices, index=False, header=True):
-                    dev_sheet.append(r)
-                self.logger.info(f"Guardados {len(df_devices)} registros de devices en hoja 'devices_imagenes_bajadas'")
-            
-            # Restaurar las validaciones de datos en las hojas originales
-            self._restore_data_validations(workbook, validations_backup)
-            
-            # Guardar el archivo
-            workbook.save(excel_path)
-            self.logger.info("✅ Archivo guardado preservando validaciones de dropdown")
-            
+                    s2.append(r)
+            self._restore_data_validations(wb, backup)
+            wb.save(excel_path)
         except Exception as e:
             self.logger.error(f"Error guardando con preservación de validaciones: {e}")
-            # Fallback al método original
-            with pd.ExcelWriter(excel_path, mode='a', if_sheet_exists='replace', engine='openpyxl') as writer:
-                if not df_references.empty:
-                    df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
-                if not df_devices.empty:
-                    df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
-
-    def _restore_data_validations(self, workbook, validations_backup):
-        """
-        Restaura las validaciones de datos en el workbook
-        """
-        try:
-            import openpyxl
-            from openpyxl.worksheet.datavalidation import DataValidation
-            
-            for sheet_name, validations in validations_backup.items():
-                if sheet_name in workbook.sheetnames:
-                    sheet = workbook[sheet_name]
-                    
-                    # Limpiar validaciones existentes
-                    sheet.data_validations = openpyxl.worksheet.datavalidation.DataValidationList()
-                    
-                    # Restaurar cada validación
-                    for val_data in validations:
-                        try:
-                            dv = DataValidation(
-                                type=val_data['type'],
-                                formula1=val_data['formula1'],
-                                formula2=val_data['formula2'],
-                                operator=val_data['operator'],
-                                allow_blank=val_data['allow_blank']
-                            )
-                            
-                            # Restaurar mensajes
-                            if val_data['error']:
-                                dv.error = val_data['error']
-                            if val_data['errorTitle']:
-                                dv.errorTitle = val_data['errorTitle']
-                            if val_data['prompt']:
-                                dv.prompt = val_data['prompt']
-                            if val_data['promptTitle']:
-                                dv.promptTitle = val_data['promptTitle']
-                            
-                            # Aplicar a los rangos originales
-                            for range_str in val_data['ranges']:
-                                dv.add(range_str)
-                            
-                            sheet.add_data_validation(dv)
-                            
-                        except Exception as e:
-                            self.logger.warning(f"No se pudo restaurar validación en {sheet_name}: {e}")
-                            
-        except Exception as e:
-            self.logger.warning(f"Error restaurando validaciones: {e}")
+            try:
+                with pd.ExcelWriter(excel_path, mode='a', if_sheet_exists='replace', engine='openpyxl') as writer:
+                    if df_references is not None and not df_references.empty:
+                        df_references.to_excel(writer, sheet_name='revisar_imagenes_bajadas', index=False)
+                    if df_devices is not None and not df_devices.empty:
+                        df_devices.to_excel(writer, sheet_name='devices_imagenes_bajadas', index=False)
+            except Exception as e2:
+                self.logger.error(f"Fallo en fallback de guardado: {e2}")
 
     def download_device_images(self, excel_path: str = None, dry_run: bool = False) -> Dict:
         """
@@ -1205,7 +1101,7 @@ class ImageReviewDownloader:
             
             # Cargar datos de devices
             devices_df = self.load_devices_data(excel_path)
-            devices_to_process = devices_df[devices_df['revisar_imagenes'] == 'si']
+            devices_to_process = devices_df[devices_df['revisar_imagenes'].astype(str).str.lower() == 'si']
             
             if devices_to_process.empty:
                 self.logger.info("No hay devices marcados para revisión de imágenes")
@@ -1266,65 +1162,70 @@ class ImageReviewDownloader:
         Returns:
             Diccionario con estadísticas del procesamiento
         """
-        device_id = device_row['device_id']
-        device_name = device_row.get('device_name', device_id)
-        
+        device_id = device_row.get('device_id')
+        device_name = device_row.get('device_name') or device_id
+
         self.logger.info(f"Procesando device: {device_name} (ID: {device_id})")
-        
-        # Crear carpeta para el device dentro de devices/
-        device_folder = os.path.join(self.carpeta_destino, "devices", str(device_id))
+
+        # Normalizar device_id para comparación (puede venir como int o str)
+        try:
+            device_id_int = int(device_id) if pd.notna(device_id) else None
+        except Exception:
+            device_id_int = None
+
+        # Filtrar transacciones del device
+        df_tx = elastic_df.copy()
+        if device_id_int is not None and 'device_id' in df_tx.columns:
+            # Convertir a numérico seguro para comparar
+            df_tx['__dev_id_num'] = pd.to_numeric(df_tx['device_id'], errors='coerce')
+            df_tx = df_tx[df_tx['__dev_id_num'] == device_id_int]
+        elif 'device_name' in df_tx.columns and pd.notna(device_name):
+            df_tx = df_tx[df_tx['device_name'].astype(str).str.lower() == str(device_name).lower()]
+
+        # Aplicar filtro de tipo de transacciones (cliente / manual / ambas)
+        if not df_tx.empty:
+            df_tx = self.filter_transactions_by_type(df_tx)
+
+        if df_tx.empty:
+            self.logger.warning(f"No hay transacciones para device {device_name}")
+            return { 'device': device_name, 'images': 0, 'transactions': 0 }
+
+        # Quedarnos solo con transacciones que tengan imagen
+        if 'has_image' in df_tx.columns:
+            df_tx = df_tx[df_tx['has_image'] == True]
+        else:
+            # Intentar deducir a partir de image_link
+            if 'image_link' in df_tx.columns:
+                df_tx = df_tx[df_tx['image_link'].notna() & (df_tx['image_link'] != '') & (df_tx['image_link'] != 'None')]
+
+        if df_tx.empty:
+            self.logger.warning(f"No hay transacciones con imágenes para device {device_name}")
+            return { 'device': device_name, 'images': 0, 'transactions': 0 }
+
+        # Seleccionar hasta N transacciones aleatorias
+        num_to_select = min(self.num_imagenes, len(df_tx))
+        selected_tx = df_tx.sample(n=num_to_select, random_state=42)
+
+        # Carpeta de destino
+        device_folder = os.path.join(self.carpeta_destino, 'devices', str(device_id))
         if not dry_run:
             os.makedirs(device_folder, exist_ok=True)
-        
-        # Filtrar transacciones de este device con imágenes
-        device_transactions = elastic_df[
-            (elastic_df['device_id'] == device_id) & 
-            (elastic_df['has_image'] == True)
-        ].copy()
-        
-        if device_transactions.empty:
-            self.logger.warning(f"No hay transacciones con imágenes para device {device_id}")
-            return {'device': device_id, 'images': 0}
-        
-        # Seleccionar transacciones aleatorias
-        num_to_select = min(self.num_imagenes, len(device_transactions))
-        selected_transactions = device_transactions.sample(n=num_to_select, random_state=42)
-        
-        # Descargar imágenes
+
         images_downloaded = 0
-        for _, transaction in selected_transactions.iterrows():
-            # Pasar información del device como contexto
-            if self.download_image_from_transaction(
-                transaction, 
-                device_folder, 
-                f"DEVICE_{device_id}",  # reference_name
-                device_name,            # product_name  
-                "device"                # product_type
-            ):
+        for _, tx in selected_tx.iterrows():
+            success = self.download_image_from_transaction(
+                tx,
+                device_folder,
+                reference_name=None,
+                product_name=device_name,
+                product_type='device'
+            )
+            if success:
                 images_downloaded += 1
-        
-        self.logger.info(f"    Descargadas {images_downloaded} imágenes para device {device_id}")
-        
-        return {'device': device_id, 'images': images_downloaded}
 
-
-def main():
-    """
-    Función principal para pruebas
-    """
-    logging.basicConfig(level=logging.INFO)
-    
-    downloader = ImageReviewDownloader()
-    
-    try:
-        results = downloader.download_review_images()
-        print("Proceso completado exitosamente:")
-        print(f"Referencias procesadas: {results['references_processed']}")
-        print(f"Total imágenes descargadas: {results['total_images']}")
-        
-    except Exception as e:
-        print(f"Error en el proceso: {e}")
-
-
-if __name__ == "__main__":
-    main()
+        self.logger.info(f"    Device {device_name}: {images_downloaded}/{num_to_select} imágenes descargadas")
+        return {
+            'device': device_name,
+            'images': images_downloaded,
+            'transactions': int(len(selected_tx))
+        }

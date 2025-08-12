@@ -1,7 +1,12 @@
+# Sensibles / credenciales
+.env
+config/credentials/credentials_elastic_prod.json
+config/credentials/*.json
 # Dataset Manager - Archivos sensibles y temporales
 
 # Variables de entorno con credenciales
 .env
+.env*
 
 # Archivos de credenciales
 config/credentials/

@@ -15,6 +15,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from utils.elastic_utils import load_config, connect_es, download_data, convert_to_dataframe
+from utils.file_manager import write_csv_sc, ensure_parent_dir
 from utils.bbdd_utils import get_db_connection, add_image_columns_to_dataframe
 
 class DataExtractor:
@@ -48,6 +49,20 @@ class DataExtractor:
                 auth_method=elastic_config.get('auth_method'),
                 api_key_id=elastic_config.get('api_key_id'),
                 api_key_secret=elastic_config.get('api_key_secret'),
+                port=elastic_config.get('port', 9200)
+            )
+            # Ajustar protocolo según use_ssl si está definido y verify_certs es False pero se quiere https
+            if elastic_config.get('use_ssl') and not elastic_config.get('verify_certs', True):
+                # Reconectar forzando https sin verificación de certs
+                self.logger.debug('Reconectando a Elasticsearch forzando HTTPS sin verify_certs')
+                self.es_client = connect_es(
+                    host=elastic_config['host'],
+                    username=elastic_config.get('username', ''),
+                    password=elastic_config.get('password', ''),
+                    verify_certs=False,
+                    auth_method=elastic_config.get('auth_method'),
+                    api_key_id=elastic_config.get('api_key_id'),
+                    api_key_secret=elastic_config.get('api_key_secret'),
                 port=elastic_config.get('port', 9200)
             )
             self.logger.info("Conexión a Elasticsearch establecida")
@@ -523,6 +538,26 @@ class DataExtractor:
             if model_to_use:
                 model_data = self.extract_model_data(model_to_use)
             
+            # Cache Elasticsearch data a CSV (para reutilización en creación de dataset sin re-leer Excel)
+            try:
+                if not elastic_df.empty:
+                    # Guardar siempre en la carpeta reports del proceso activo (o reports global)
+                    if hasattr(self.settings, 'active_process') and self.settings.active_process:
+                        proc_info = self.settings.active_process
+                        process_dir = proc_info.get('process_dir') or proc_info.get('directory')
+                        if process_dir:
+                            reports_dir = os.path.join(process_dir, 'reports')
+                        else:
+                            reports_dir = self.settings.get_output_directory('reports')
+                    else:
+                        reports_dir = self.settings.get_output_directory('reports')
+                    os.makedirs(reports_dir, exist_ok=True)
+                    cache_path = os.path.join(reports_dir, 'elastic_data.csv')
+                    write_csv_sc(elastic_df, cache_path, index=False)
+                    self.logger.info(f"Datos Elasticsearch cacheados en: {cache_path}")
+            except Exception as ce:
+                self.logger.warning(f"No se pudo cachear datos Elasticsearch: {ce}")
+
             # Compilar todos los datos
             extracted_data = {
                 'elastic_data': elastic_df,

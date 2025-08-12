@@ -33,7 +33,8 @@ paths:
 # Configuración de archivos
 files:
   elastic_query_template: "./query/consulta_elastic_dataset_training.json"
-  elastic_credentials: "./config/credentials/credentials_elastic_prod.json"
+  # elastic_credentials (deprecated): mantenido por compatibilidad, ya no se usa; credenciales vienen de variables de entorno
+  elastic_credentials: "deprecated_env_based"
 
 # Configuración para procesamiento de imágenes
 image_processing:

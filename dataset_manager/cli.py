@@ -61,6 +61,11 @@ Ejemplos de uso:
         type=str,
         help='Directorio base de salida (sobrescribe configuración)'
     )
+    parser.add_argument(
+        '--env',
+        type=str,
+        help='Nombre de environment (usa .env_<env>; si no se indica usa .env)'
+    )
     
     # Subcomandos
     subparsers = parser.add_subparsers(
@@ -103,10 +108,7 @@ Ejemplos de uso:
         '-d', '--dataset', required=False,
         help='Nombre del dataset a resumir (si se omite se pedirá)'
     )
-    summary_parser.add_argument(
-        '--elastic-credentials', required=False,
-        help='Ruta al fichero JSON de credenciales de Elasticsearch (default: config/credentials/credentials_elastic_prod.json)'
-    )
+    # Ya no se usa archivo de credenciales separado; se leen de variables de entorno (.env / --env)
     summary_parser.add_argument(
         '--index', required=False, default='device_transaction-*',
         help='Patrón de índice de Elasticsearch (default: device_transaction-*)'
@@ -776,11 +778,9 @@ def handle_review_images_command(args):
         # Ejecutar descarga
         results = downloader.download_review_images(excel_file)
         
-        # Generar archivo Excel con registro de imágenes descargadas
+        # Ya se intenta guardar dentro de download_review_images; evitar doble intento
         if downloader.downloaded_images_log:
-            # Usar el archivo original para agregar la nueva hoja
-            downloader._save_downloaded_images_log(excel_file)
-            logger.info(f"Registro de imágenes descargadas guardado en hoja 'revisar_imagenes_bajadas' del archivo original: {excel_file}")
+            logger.info("(El log de imágenes se guarda durante la ejecución; no se repite para evitar duplicados)")
         
         # Mostrar resultados
         logger.info("=== RESUMEN DE RESULTADOS ===")
@@ -860,8 +860,55 @@ def print_processing_summary(results):
 
 def main():
     """Función principal del CLI"""
+    raw_args = sys.argv[1:]
+
+    # 1. Pre-scan de --env ANTES de crear el parser para que Settings() lea ya el .env correcto
+    env_value = None
+    pre_clean_args = []
+    skip_next = False
+    for i, a in enumerate(raw_args):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == '--env':
+            if i + 1 < len(raw_args):
+                env_value = raw_args[i + 1].strip().strip('"').strip("'")
+                skip_next = True
+            else:
+                print("⚠ --env indicado sin valor; ignorando")
+        else:
+            pre_clean_args.append(a)
+
+    # 2. Cargar archivo .env específico con override=True para que realmente cambie valores previos
+    try:
+        from dotenv import load_dotenv
+        env_file = '.env'
+        if env_value:
+            candidate = f".env_{env_value}"
+            if os.path.exists(candidate):
+                env_file = candidate
+            else:
+                print(f"⚠ No existe {candidate}; usando {env_file}")
+        # Limpiar variables ELASTIC_* y DB_* previas para evitar fugas entre entornos
+        for k in list(os.environ.keys()):
+            if k.startswith('ELASTIC_') or k.startswith('DB_PROD_RO_'):
+                # No eliminar si el nuevo .env no define nada (las que se necesiten se volverán a poner)
+                os.environ.pop(k, None)
+        load_dotenv(env_file, override=True)
+        if env_value:
+            os.environ['DM_ACTIVE_ENV'] = env_value
+    except Exception as _e:
+        print(f"Aviso: no se pudo cargar variables de entorno ({_e})")
+
+    # 3. Crear parser (ahora Settings dentro de create_parser usará ya el entorno correcto)
     parser = create_parser()
-    args = parser.parse_args()
+
+    # 4. Reconstruir args para incluir --env (solo para que aparezca en args si el usuario lo pasó)
+    cleaned_args = pre_clean_args
+    if env_value:
+        cleaned_args = ['--env', env_value] + cleaned_args
+
+    args = parser.parse_args(cleaned_args)
     
     # Mostrar ayuda si no se especifica comando
     if not args.command:
@@ -1267,49 +1314,55 @@ def handle_merge_datasets_command(args):
         try:
             sheet_name = 'datasets_creados'
             import pandas as pd
-            rows_df = pd.DataFrame(log_rows)
-            # Cargar workbook con fallback si está corrupto / no es zip
             from zipfile import BadZipFile
-            try:
-                workbook = openpyxl.load_workbook(excel_path)
-            except (BadZipFile, OSError, KeyError) as e:
-                print(f"Aviso: no se pudo abrir '{excel_path}' ({e}); se creará un nuevo Excel para logs de merge.")
+            from utils.report_excel_manager import ReportExcelManager, ExcelLockedError
+
+            rows_df = pd.DataFrame(log_rows)
+
+            def _update_merge_log(wb):
+                # Si el workbook es nuevo (solo tiene Sheet), limpiar si hace falta
+                if sheet_name in wb.sheetnames:
+                    # Cargar existente desde Excel real para preservar tipos
+                    try:
+                        existing_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                    except Exception:
+                        existing_df = pd.DataFrame()
+                    if 'origen' not in existing_df.columns:
+                        existing_df['origen'] = 'crear_dataset'
+                    if 'dataset_original' not in existing_df.columns:
+                        existing_df['dataset_original'] = ''
+                    combined_df = pd.concat([existing_df, rows_df], ignore_index=True)
+                    # eliminar hoja para re-crear
+                    del wb[sheet_name]
+                else:
+                    combined_df = rows_df
+
+                insert_after = None
+                if 'Devices' in wb.sheetnames:
+                    insert_after = wb.sheetnames.index('Devices') + 1
+                sheet = wb.create_sheet(sheet_name, index=insert_after if insert_after is not None else None)
+                for r in dataframe_to_rows(combined_df, index=False, header=True):
+                    sheet.append(r)
+
+            # Si el archivo no existe o está corrupto crear base mínima
+            if not Path(excel_path).exists():
                 import openpyxl as _ox
-                workbook = _ox.Workbook()
-                # El workbook nuevo trae una hoja por defecto; la eliminaremos luego si no coincide
-                # Asegurar que no haya conflicto de nombre
-                if sheet_name in workbook.sheetnames:
-                    del workbook[sheet_name]
-            if sheet_name in workbook.sheetnames:
-                existing_df = pd.read_excel(excel_path, sheet_name=sheet_name)
-                # Asegurar columnas origen/dataset_original
-                if 'origen' not in existing_df.columns:
-                    existing_df['origen'] = 'crear_dataset'
-                if 'dataset_original' not in existing_df.columns:
-                    existing_df['dataset_original'] = ''
-                combined_df = pd.concat([existing_df, rows_df], ignore_index=True)
-                del workbook[sheet_name]
+                base_wb = _ox.Workbook()
+                base_wb.save(excel_path)
             else:
-                combined_df = rows_df
-            insert_after = None
-            if 'Devices' in workbook.sheetnames:
-                insert_after = workbook.sheetnames.index('Devices') + 1
-            sheet = workbook.create_sheet(sheet_name, index=insert_after if insert_after is not None else None)
-            for r in dataframe_to_rows(combined_df, index=False, header=True):
-                sheet.append(r)
-            try:
-                workbook.save(excel_path)
-            except Exception as e:
-                # Último fallback: guardar a un nuevo archivo separado
-                fallback_path = Path(excel_path).with_name(Path(excel_path).stem + '_merge_log.xlsx')
-                print(f"Aviso: fallo guardando Excel principal ({e}); guardando en {fallback_path}")
                 try:
-                    workbook.save(fallback_path)
-                except Exception as e2:
-                    print(f"Error guardando incluso fallback: {e2}")
+                    _ = openpyxl.load_workbook(excel_path)
+                except (BadZipFile, OSError, KeyError):
+                    print(f"Aviso: Excel corrupto, se regenerará base vacía: {excel_path}")
+                    import openpyxl as _ox
+                    base_wb = _ox.Workbook()
+                    base_wb.save(excel_path)
+
+            manager = ReportExcelManager(excel_path, interactive=True)
+            manager.save_with_validations(_update_merge_log)
             print(f'Registro Excel actualizado: {excel_path}')
-        except PermissionError:
-            print('Excel abierto; no se pudo actualizar el log.')
+        except ExcelLockedError:
+            print('Excel abierto; no se pudo actualizar el log tras reintentos.')
         except Exception as e:
             print(f'Error actualizando Excel: {e}')
 

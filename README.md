@@ -1,10 +1,52 @@
 # Dataset Manager gFresh
+* Python 3.8+
+* Acceso a Elasticsearch (lectura)
+* Acceso de lectura a MySQL
+* Credenciales de AWS S3 (opcional para imágenes / registro)
+* Espacio en disco suficiente (imágenes)
+* Conexión a internet estable
+
+## 🔄 Cambios Clave
+
+* Renombrado `crear_dataset` → `create_dataset`.
+* Integrado `review_devices` en `review_images`.
+* Nuevos comandos: `folder_structure`, `merge_datasets`, `summary_dataset`, `register_dataset`.
+* Multi‑entorno vía `--env` y archivos `.env_<nombre>` (posición flexible en CLI).
+* Migración completa a `.env` (eliminado JSON Elastic). Soporte API Key única (`ELASTIC_API_KEY`).
+* Limpieza automática de variables sensibles al cambiar de entorno.
+* Centralización guardado Excel (`ReportExcelManager`) preservando dropdowns y gestionando bloqueo.
+* Cache de datos Elastic en `reports/elastic_data.csv` dentro del proceso activo.
+* Dataset filtering: métricas/validaciones restringidas a referencias incluidas (`incluir_dataset=si/sí`).
+* Eliminado modo obsoleto `analyze`.
+* Simplificación autenticación Elastic (api_key / basic_auth) + flags `ELASTIC_VERIFY_CERTS` / `ELASTIC_USE_SSL`.
+* Eliminada creación de archivos Excel alternativos “pendientes”.
+
+## 🛠️ Desarrollo & Contribución
+
+```bash
+# Clonar repositorio
+git clone <repository_url>
+cd ops_gFresh_dataset_training
+
+# Crear entorno
+python -m venv venv
+./venv/Scripts/activate  # Windows
+pip install -r requirements.txt
+
+# Copiar y editar variables
+cp .env.example .env
+
+# Ejecutar comando de prueba
+python main.py status
+
+# Instalar en editable (opcional)
+# Dataset Manager gFresh
 
 CLI para descargar datos de inferencia, generar informes y gestionar el ciclo de vida de datasets (creación, fusión, resumen y registro en S3).
 
 ## 🎯 Objetivo
 
-Automatizar selección y preparación de imágenes de producción para entrenar y versionar modelos de clasificación retail.
+Automatizar la selección y preparación de imágenes de producción para entrenar y versionar modelos de clasificación retail.
 
 ## 🏗️ Estructura
 
@@ -12,323 +54,292 @@ Automatizar selección y preparación de imágenes de producción para entrenar 
 
 ## 🚀 Principales Capacidades
 
-1. Descarga y consolidación de datos (Elastic + MySQL) en un Excel multi‑pestaña.
+1. Extracción y consolidación de datos (Elasticsearch + MySQL) en un Excel multi‑pestaña.
 2. Marcado y descarga selectiva de imágenes (referencias y devices) con modo dry‑run.
-3. Creación estructurada de datasets (clase/label_id) y operaciones auxiliares: merge, summary, registro en S3.
-4. Gestión de procesos aislados (cada ejecución crea un directorio auto‑contenedor con logs, datos, imágenes y reports).
+3. Creación estructurada de datasets (clase/label_id) y utilidades: merge, summary, registro en S3.
+4. Gestión de procesos aislados (cada ejecución crea un directorio autocontenido con logs, datos, imágenes y reports).
+5. Multi‑entorno flexible mediante `--env` y archivos `.env_<nombre>`.
 
-## 📦 Instalación
+## 📦 Instalación Rápida
 
 ```bash
 python -m venv venv
-./venv/Scripts/activate   # Windows
+./venv/Scripts/activate  # Windows
 pip install -r requirements.txt
-cp .env.example .env  # Rellenar credenciales
+cp .env.example .env
 ```
 
-### Credenciales
+## 🔐 Credenciales y Multi‑entorno
 
-1. **Variables de entorno (.env):**
+Todas las credenciales se gestionan EXCLUSIVAMENTE vía archivos `.env`. Eliminado el uso de JSON de credenciales Elastic.
+
+Archivos soportados:
+
+```text
+.env           # Por defecto
+.env_walmart   # Cliente / entorno específico
+.env_dev       # Desarrollo
+.env_prod      # Producción
+```
+
+Ejemplos de uso (el parámetro `--env` puede ir en cualquier posición):
 
 ```bash
-# Copiar archivo de ejemplo
-cp .env.example .env
+python main.py download_info 101 --env walmart --days-back 7
+python main.py --env dev status
+```
 
-# Editar con credenciales reales
+Si `.env_<env>` no existe se usa `.env` con aviso.
+
+### Variables Base MySQL (lectura)
+
+```dotenv
 DB_PROD_RO_HOST=your_mysql_host
-DB_PROD_RO_USER=your_readonly_user
-DB_PROD_RO_PASSWORD=your_readonly_password
-DB_PROD_RO_DATABASE=your_database_name
+DB_PROD_RO_USER=readonly_user
+DB_PROD_RO_PASSWORD=readonly_password
+DB_PROD_RO_DATABASE=your_database
+DB_PROD_RO_PORT=3306
 ```
 
-1. **Elasticsearch:**
+### Elasticsearch (dos modos)
 
-Crear `config/credentials/credentials_elastic_prod.json`:
+API Key (recomendado):
 
-```json
-{
-    "host": "tu-cluster.elasticsearch.com",
-    "port": 9243,
-    "verify_certs": true,
-    "username": "tu_usuario",
-    "password": "tu_password",
-    "use_ssl": true
-}
+```dotenv
+ELASTIC_HOST=cluster_id.region.aws.elastic-cloud.com
+ELASTIC_PORT=9243
+ELASTIC_AUTH_METHOD=api_key
+ELASTIC_API_KEY=base64_api_key_unico
+ELASTIC_VERIFY_CERTS=true
+ELASTIC_USE_SSL=true
 ```
 
-1. **AWS S3:**
+Basic Auth:
 
-Las credenciales de S3 se configuran automáticamente desde el archivo de Elasticsearch.
+```dotenv
+ELASTIC_HOST=cluster_id.region.aws.elastic-cloud.com
+ELASTIC_PORT=9243
+ELASTIC_AUTH_METHOD=basic_auth
+ELASTIC_USERNAME=elastic_user
+ELASTIC_PASSWORD=elastic_password
+ELASTIC_VERIFY_CERTS=true
+ELASTIC_USE_SSL=true
+```
+
+Notas:
+
+* `ELASTIC_API_KEY` basta (no requiere id/secret separados).
+* Si defines `ELASTIC_API_KEY` y no `ELASTIC_AUTH_METHOD`, se infiere `api_key`.
+* `ELASTIC_VERIFY_CERTS=false` para entornos de prueba.
+* Cambiar de entorno limpia variables `ELASTIC_*` y `DB_PROD_RO_*` previas.
+
+### S3 (opcional para imágenes / registro)
+
+```dotenv
+REMOTE_STORAGE_ACCESS_KEY=...
+REMOTE_STORAGE_SECRET_KEY=...
+REMOTE_STORAGE_REGION=eu-west-2
+S3_BUCKET=grabit-data
+```
+
+### Ejemplo mínimo `.env.example`
+
+```dotenv
+DB_PROD_RO_HOST=your_mysql_host
+DB_PROD_RO_USER=readonly_user
+DB_PROD_RO_PASSWORD=readonly_password
+DB_PROD_RO_DATABASE=your_db
+DB_PROD_RO_PORT=3306
+
+ELASTIC_HOST=your-cluster.eu-west-3.aws.elastic-cloud.com
+ELASTIC_PORT=9243
+ELASTIC_AUTH_METHOD=api_key
+ELASTIC_API_KEY=base64_api_key_value
+ELASTIC_VERIFY_CERTS=true
+ELASTIC_USE_SSL=true
+
+S3_BUCKET=grabit-data
+LOG_LEVEL=INFO
+```
 
 ## 🖥️ Uso Rápido
 
 ```bash
-# Activar entorno virtual
 ./venv/Scripts/activate  # Windows
 source venv/bin/activate # Linux/Mac
 
-# Descarga y genera Excel del deployment 130 (últimos 30 días)
-python main.py download_info 130 --days-back 30
+# Crear proceso y Excel (30 días por defecto) en entorno walmart
+python main.py download_info 130 --days-back 30 --env walmart
 
-# Crear dataset (estructura de carpetas) a partir del proceso activo
+# Crear dataset desde el proceso activo
 python main.py create_dataset
 
 # Resumen del dataset
 python main.py summary_dataset -d dataset_130_010825_v1
 
-# Registrar (ZIP + S3 + CSV global)
+# Registrar dataset (ZIP + S3 + CSV global)
 python main.py register_dataset -d dataset_130_010825_v1
 
-# Fusionar varios datasets
+# Fusionar datasets
 python main.py merge_datasets
 
 # Estructura de carpetas hoja
 python main.py folder_structure
 ```
 
-## 📜 Comandos
+## 📜 Comandos Principales
 
-| Comando | Descripción breve |
-|---------|-------------------|
-| `download_info <deployment_id>` | Descarga datos + genera Excel. |
-| `active-process` | Gestiona proceso activo (listar, set, clear). |
-| `status` | Muestra configuración y paths. |
-| `review_images` | Descarga imágenes marcadas (productos + devices). |
-| `create_dataset` | Crea estructura de dataset desde Excel. |
-| `folder_structure` | CSV con carpetas hoja e imágenes. |
-| `merge_datasets` | Fusiona varios datasets. |
-| `summary_dataset` | CSV resumen cruzando imágenes con datos. |
-| `register_dataset` | ZIP + S3 + registro en CSV global. |
+| Comando | Descripción |
+|---------|-------------|
+| `download_info <deployment_id>` | Extrae datos y genera Excel multi‑pestaña |
+| `active-process` | Gestiona proceso activo (listar, set, clear) |
+| `status` | Muestra configuración y paths |
+| `review_images` | Descarga imágenes marcadas (productos + devices) |
+| `create_dataset` | Crea estructura de dataset desde Excel |
+| `folder_structure` | CSV con carpetas hoja e imágenes |
+| `merge_datasets` | Fusiona varios datasets existentes |
+| `summary_dataset` | CSV resumen cruzando imágenes con datos |
+| `register_dataset` | Empaqueta, sube a S3 y registra dataset |
 
-Parámetros clave (según comando): `--days-back`, `--confidence`, `--min-appearances`, `--process-name`, `--fast`, `--limit-refs`, `--images-per-ref`, `--dry-run`, `--no-filter-used`.
-
-### Ejemplos
-
-```bash
-# Ajustando confianza y nombre de proceso
-python main.py download_info 130 --days-back 45 --confidence 0.78 --process-name dataset_130_aug_v2
-
-# Dataset modo rápido
-python main.py create_dataset --fast --limit-refs 25 --images-per-ref 12
-
-# No filtrar transacciones ya usadas
-python main.py create_dataset --no-filter-used
-
-# Resumen y registro sin regenerar ZIP ni reemplazar S3
-python main.py summary_dataset -d dataset_130_aug_v2
-python main.py register_dataset -d dataset_130_aug_v2
-```
+Parámetros útiles: `--days-back`, `--confidence`, `--min-appearances`, `--process-name`, `--fast`, `--limit-refs`, `--images-per-ref`, `--dry-run`, `--no-filter-used`.
 
 ## 📊 Outputs
 
-### Directorios del Sistema
+### Estructura de procesos
 
 ```text
 output/
-├── processes/                 # Procesos independientes
-│   └── dataset_{id}_{date}_v1/
-│       ├── reports/          # Archivos Excel generados
-│       ├── images/           # Imágenes descargadas
-│       │   ├── productos/    # Imágenes de referencias
-│       │   └── devices/      # Imágenes por device
-│       ├── data/            # Datos procesados
-│       ├── logs/            # Logs detallados
-│       └── process_metadata.json
-└── legacy/                   # Archivos antiguos (compatibilidad)
+ └─ processes/
+     └─ dataset_{deployment}_{fecha}_vX/
+         ├─ reports/
+         ├─ images/
+         │   ├─ productos/
+         │   └─ devices/
+         ├─ data/
+         ├─ logs/
+         └─ process_metadata.json
 ```
 
-### Archivos Excel Generados
+### Excel principal `dataset_{deployment_id}_{timestamp}.xlsx`
 
-#### Archivo Principal: `dataset_{deployment_id}_{timestamp}.xlsx`
+Pestañas: `Resumen`, `Datos_Elasticsearch`, `References`, `Devices`, `Labels`, `Model_Data`, `Consistencia`, `revisar_imagenes_bajadas`, `devices_imagenes_bajadas`.
 
-**Pestañas principales:**
+**References (ejemplo columnas):** `reference_name`, `label_name`, `total_transactions`, `ok_percentage`, `model_ok_percentage`, `revisar_imagenes`, métricas top1/top2/top3.
 
-- **`Resumen`**: Métricas ejecutivas y KPIs principales
-- **`Datos_Elasticsearch`**: Dataset completo con 26K+ registros
-- **`References`**: 74 referencias analizadas con métricas
-- **`Devices`**: 9 devices con análisis individual de rendimiento
-- **`Labels`**: Clasificaciones y etiquetas del modelo
-- **`Model_Data`**: Configuración del modelo activo
-- **`Consistencia`**: Validaciones e inconsistencias detectadas
+**Devices (ejemplo columnas):** `device_id`, `device_name`, `total_transactions`, `ok_percentage`, `revisar_imagenes`, métricas de precisión y errores.
 
-**Pestañas de seguimiento de imágenes:**
-
-- **`revisar_imagenes_bajadas`**: Log detallado de imágenes de productos
-- **`devices_imagenes_bajadas`**: Log detallado de imágenes de devices
-
-#### Estructura de Datos en Pestañas
-
-**References (ejemplo):**
-
-- `reference_name`: Código de la referencia
-- `label_name`: Nombre de la etiqueta asociada
-- `total_transactions`: Total de transacciones
-- `ok_percentage`: % de aciertos del sistema
-- `model_ok_percentage`: % de aciertos del modelo
-- `revisar_imagenes`: Marca para descarga de imágenes
-- Métricas adicionales por top1, top2, top3
-
-**Devices (ejemplo):**
-
-- `device_id`: ID único del dispositivo
-- `device_name`: Nombre del dispositivo
-- `total_transactions`: Transacciones procesadas
-- `ok_percentage`: Rendimiento del dispositivo
-- `revisar_imagenes`: Marca para descarga de imágenes
-- Métricas de precisión y errores
-
-## ⚙️ Configuración (extracto)
-
-### Variables de Entorno (.env)
+## ⚙️ Configuración Rápida (.env)
 
 ```bash
-# Base de datos MySQL (Solo lectura) - REQUERIDO
-DB_PROD_RO_HOST=your_mysql_host
-DB_PROD_RO_USER=your_readonly_user
-DB_PROD_RO_PASSWORD=your_readonly_password
-DB_PROD_RO_DATABASE=your_database_name
+DB_PROD_RO_HOST=...
+DB_PROD_RO_USER=...
+DB_PROD_RO_PASSWORD=...
+DB_PROD_RO_DATABASE=...
 DB_PROD_RO_PORT=3306
-
-# Configuración opcional
-LOG_LEVEL=INFO
-OUTPUT_BASE_DIR=./output
 ```
 
-### Configuración de Descarga de Imágenes
-
-La configuración se maneja automáticamente, pero se puede personalizar:
+### Descarga de Imágenes (settings.yaml)
 
 ```yaml
 image_review:
-  num_imagenes_revision: 5              # Imágenes por referencia/device
-  tipo_transacciones: "ambas"           # correctas|incorrectas|ambas
-  clear_output_folder: true             # Limpiar carpeta antes de descargar
-  tipo_imagenes_bajar: "clase_y_similares"  # Tipos de productos a descargar
-  s3_bucket: "grabit-data"              # Bucket de S3
-  s3_region: "eu-west-2"                # Región de S3
+  num_imagenes_revision: 5
+  tipo_transacciones: "ambas"
+  clear_output_folder: true
+  tipo_imagenes_bajar: "clase_y_similares"
+  s3_bucket: "grabit-data"
+  s3_region: "eu-west-2"
 ```
 
 ## 🔧 Flujo Resumido
 
-1. `download_info <deployment_id>` → genera proceso + Excel.
-2. Marcar en Excel referencias/devices con `revisar_imagenes=si`.
-3. `review_images` (dry‑run opcional, luego real).
+1. `download_info` → crea proceso + Excel.
+2. Editar Excel: marcar `revisar_imagenes=si`.
+3. `review_images` (opcional `--dry-run`).
 4. `create_dataset` (opcional `--fast`).
-5. `summary_dataset` y/o `merge_datasets` si hace falta combinar.
-6. `register_dataset` para ZIP + S3 + registro.
+5. `summary_dataset` y/o `merge_datasets`.
+6. `register_dataset` (ZIP + S3 + registro).
 
 ## 🔒 Seguridad
 
-### Credenciales Seguras
+**Principios:** uso exclusivo de `.env`, sólo lectura en BD, aislamiento por proceso, `.gitignore` protege artefactos y credenciales.
 
-- **Variables de entorno** para DB (archivo `.env`)
-- **Archivos JSON separados** para servicios complejos
-- **Exclusión completa** del control de versiones
-- **Conexiones de solo lectura** para todas las fuentes
-
-### Archivos Protegidos (en .gitignore)
+**Archivos ignorados clave:**
 
 ```text
-.env                          # Variables de entorno
-config/credentials/           # Directorio de credenciales
-logs/                         # Archivos de log
-output/                       # Archivos de salida
-venv/                         # Entorno virtual
+.env*
+output/
+logs/
+venv/
+config/active_process.json
 ```
+
+### Gestión de Excel Segura
+
+`ReportExcelManager` controla:
+
+* Reintentos si el archivo está abierto.
+* Reaplicación de validaciones (dropdowns).
+* Sin archivos alternativos “pendientes”.
 
 ## 🚨 Problemas Comunes
 
-### Problemas Comunes
+**Credenciales inválidas:** `python main.py status`.
 
-**Error de credenciales:**
+**Proceso activo ausente:** `python main.py active-process`.
 
-```bash
-python main.py status  # Verificar configuración
-```
+**Imágenes no descargadas:** ver marca `revisar_imagenes`, credenciales S3 y usar `--dry-run`.
 
-**Proceso activo no encontrado:**
+**Excel bloqueado:** cerrar el archivo; el sistema reintenta automáticamente.
 
-```bash
-python main.py active-process  # Ver estado actual
-```
+### Logs
 
-**Imágenes no se descargan:**
-
-- Verificar credenciales de S3
-- Comprobar que hay referencias/devices marcados con `revisar_imagenes=si`
-- Usar `--dry-run` para simular primero
-
-**Excel está abierto:**
-
-- Cerrar archivo Excel antes de ejecutar comandos
-- El sistema intentará 3 veces y creará backup si es necesario
-
-### Logs y Diagnóstico
-
-Los logs detallados se guardan en:
-
-- `output/processes/{process_name}/logs/`
-- Console output con timestamps
-- Logs específicos por comando ejecutado
+Ubicación: `output/processes/<nombre>/logs/` + consola.
 
 ## 📋 Requisitos
 
-- **Python 3.8+** (verificado automáticamente)
-- **Acceso a Elasticsearch** con datos de inferencia
-- **Acceso de lectura a MySQL** con tablas de referencia
-- **Credenciales de AWS S3** para descarga de imágenes
-- **Espacio en disco** para imágenes (aprox. 10MB por device/referencia)
-- **Conexión a internet** estable
+* Python 3.8+
+* Acceso lectura Elasticsearch
+* Acceso lectura MySQL
+* (Opcional) Credenciales AWS S3
+* Espacio en disco suficiente
+* Conexión a internet estable
 
-## 🔄 Cambios Clave
+## 🔄 Cambios Clave (Resumen)
 
-- Renombrado `crear_dataset` → `create_dataset`.
-- Integrado `review_devices` en `review_images`.
-- Añadidos: `folder_structure`, `merge_datasets`, `summary_dataset`, `register_dataset`.
-- Registro de datasets con progreso de ZIP y subida S3 opcional.
-- Manejo robusto de Excel (permisos, corrupción parcial) y columnas enriquecidas.
+* Renombrado `crear_dataset` → `create_dataset`.
+* Integración de `review_devices` en `review_images`.
+* Nuevos comandos: `folder_structure`, `merge_datasets`, `summary_dataset`, `register_dataset`.
+* Multi‑entorno flexible (`--env`).
+* Migración a `.env` + soporte `ELASTIC_API_KEY` único.
+* Limpieza automática de variables sensibles al cambiar de entorno.
+* Excel centralizado con preservación de validaciones.
+* Cache Elastic en `reports/elastic_data.csv`.
+* Dataset filtering (sólo referencias incluidas) para métricas.
+* Eliminado modo obsoleto `analyze`.
+* Simplificación autenticación Elastic (api_key / basic_auth).
+* Eliminados archivos Excel alternativos temporales.
 
 ## 🛠️ Desarrollo
 
-Para desarrollo:
-
 ```bash
-# Clonar repositorio
 git clone <repository_url>
 cd ops_gFresh_dataset_training
-
-# Configurar entorno de desarrollo
-python setup.py
-.\venv\Scripts\activate
-
-# Instalar en modo desarrollo
-pip install -e .
-
-# Ejecutar pruebas
-python -m pytest tests/ -v
+python -m venv venv
+./venv/Scripts/activate  # Windows
+pip install -r requirements.txt
+cp .env.example .env
+python main.py status
+pip install -e .  # opcional editable
+python -m pytest -v  # si hay tests
 ```
 
 ### Extensión
 
-- Usar `ProcessAwareSettings` para configuración
-- Implementar logging con `ProcessLoggerManager`
-- Seguir patrón de carpetas por proceso
-- Documentar cambios en README
+* Usar `ProcessAwareSettings` para configuración contextual.
+* Logging unificado con `ProcessLoggerManager`.
+* Respetar estructura por proceso.
+* Documentar nuevos comandos / parámetros en este README.
 
 ---
 
----
 Autor: Alberto Gómez · Versión 2.1.1 · Agosto 2025
-
-## 🗂️ Publicación en GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial cleaned version"
-git branch -M main
-git remote add origin git@github.com:TU_ORG/ops_gfresh_dataset_manager.git
-git push -u origin main
-```
-
-Listo.

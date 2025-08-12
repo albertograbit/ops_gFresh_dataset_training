@@ -53,7 +53,7 @@ class PathsConfig:
 class FilesConfig:
     """Configuración de archivos"""
     elastic_query_template: str
-    elastic_credentials: str
+    elastic_credentials: str  # deprecated
 
 @dataclass
 class ImageProcessingConfig:
@@ -220,23 +220,53 @@ class Settings:
             load_dotenv(env_file)
             
     def get_elasticsearch_credentials(self) -> Dict[str, Any]:
+        """Obtiene credenciales de Elasticsearch desde variables de entorno.
+
+        Variables esperadas (prefijo ELASTIC_):
+          ELASTIC_HOST, ELASTIC_PORT, ELASTIC_USERNAME, ELASTIC_PASSWORD,
+          ELASTIC_API_KEY_ID, ELASTIC_API_KEY_SECRET, ELASTIC_AUTH_METHOD (api_key|basic)
         """
-        Carga las credenciales de Elasticsearch desde archivo seguro
-        
-        Returns:
-            Diccionario con credenciales de Elasticsearch
-        """
-        try:
-            credentials_path = self.get_absolute_path(self.files.elastic_credentials)
-            with open(credentials_path, 'r', encoding='utf-8') as file:
-                credentials = json.load(file)
-            return credentials
-        except FileNotFoundError:
-            logging.error(f"Archivo de credenciales de Elasticsearch no encontrado: {credentials_path}")
-            raise
-        except json.JSONDecodeError as e:
-            logging.error(f"Error al parsear credenciales de Elasticsearch: {e}")
-            raise
+        env_map = {
+            'host': 'ELASTIC_HOST',
+            'port': 'ELASTIC_PORT',
+            'username': 'ELASTIC_USERNAME',
+            'password': 'ELASTIC_PASSWORD',
+            'api_key_id': 'ELASTIC_API_KEY_ID',
+            'api_key_secret': 'ELASTIC_API_KEY_SECRET',
+            'auth_method': 'ELASTIC_AUTH_METHOD',
+            'verify_certs': 'ELASTIC_VERIFY_CERTS',
+            'use_ssl': 'ELASTIC_USE_SSL'
+        }
+        creds: Dict[str, Any] = {}
+        for key, var in env_map.items():
+            val = os.getenv(var)
+            if val is None or val == '':
+                continue
+            creds[key] = val
+        # Normalizar puerto
+        if 'port' in creds:
+            try:
+                creds['port'] = int(str(creds['port']).strip())
+            except ValueError:
+                logging.warning(f"ELASTIC_PORT inválido: {creds['port']}")
+        # Normalizar booleanos
+        for b in ['verify_certs', 'use_ssl']:
+            if b in creds:
+                creds[b] = str(creds[b]).strip().lower() in ('1','true','yes','y','si','sí')
+        # Fallback single API key (ELASTIC_API_KEY)
+        single_api_key = os.getenv('ELASTIC_API_KEY')
+        if single_api_key and 'api_key_secret' not in creds:
+            creds['api_key_secret'] = single_api_key
+        # Inferir método
+        if 'auth_method' not in creds:
+            if creds.get('api_key_secret'):
+                creds['auth_method'] = 'api_key'
+            elif creds.get('username') and creds.get('password'):
+                creds['auth_method'] = 'basic_auth'
+        # Validación mínima
+        if not creds.get('host'):
+            raise ValueError("ELASTIC_HOST no definido en el entorno activo")
+        return creds
             
     def get_database_credentials(self) -> Dict[str, Any]:
         """
@@ -292,8 +322,8 @@ class Settings:
             return str(project_root / relative_path)
     
     def get_elasticsearch_config_path(self) -> str:
-        """Obtiene la ruta completa al archivo de configuración de Elasticsearch"""
-        return self.get_absolute_path(self.files.elastic_credentials)
+        """(Deprecated) Conservado por compatibilidad, devuelve cadena informativa."""
+        return "env://deprecated"
     
     def get_query_template_path(self) -> str:
         """Obtiene la ruta completa al archivo de template de query de Elasticsearch"""

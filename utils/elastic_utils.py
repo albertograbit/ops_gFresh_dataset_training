@@ -48,19 +48,22 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 def connect_es(host: str, username: str = '', password: str = '', verify_certs: bool = True, timeout: int = 60, auth_method: str = None, api_key_id: str = None, api_key_secret: str = None, ca_certs: str = None, port: int = 9200) -> Elasticsearch:
-    """Establish a connection to Elasticsearch supporting both API key and basic auth."""
+    """Establish a connection to Elasticsearch supporting:
+    - API key usando api_key_secret (o variable de entorno ELASTIC_API_KEY)
+    - Basic auth (username/password)
+
+    Se admite un único valor de API key (secreto) sin id, como permite elasticsearch-py.
+    """
     try:
         protocol = "https" if verify_certs or ca_certs else "http"
         es_url = f"{protocol}://{host}:{port}"
         if auth_method == "api_key":
+            # Permitir fallback a variable de entorno ELASTIC_API_KEY si no llega api_key_secret
             if not api_key_secret:
-                raise ValueError("API key secret is required for API key authentication.")
-            es = Elasticsearch(
-                es_url,
-                api_key=api_key_secret,
-                verify_certs=verify_certs,
-                ca_certs=ca_certs
-            )
+                api_key_secret = os.getenv('ELASTIC_API_KEY')
+            if not api_key_secret:
+                raise ValueError("API key secret is required for API key authentication (ELASTIC_API_KEY no definido).")
+            es = Elasticsearch(es_url, api_key=api_key_secret, verify_certs=verify_certs, ca_certs=ca_certs)
         elif auth_method == "basic_auth" or (username and password):
             es = Elasticsearch(
                 es_url,

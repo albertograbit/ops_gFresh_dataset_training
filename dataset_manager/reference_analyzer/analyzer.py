@@ -7,6 +7,10 @@ import json
 from typing import List, Dict, Any, Optional
 import logging
 
+# Clasificación fija de métricas de transacción
+MANUAL_METRIC = 'WSREFERENCEIMAGEAC01'
+CLIENT_METRICS = {'WSPROCESSCOMPLETED03', 'GFRSUSERPROCESSCOM03'}  # resto consideradas cliente
+
 class ReferenceAnalyzer:
     def __init__(self, settings=None):
         self.logger = logging.getLogger(__name__)
@@ -90,30 +94,14 @@ class ReferenceAnalyzer:
             # Verificar columnas disponibles
             self.logger.info(f"Usando 'selected_reference_code' de Elasticsearch para mapear con 'reference_code' de BD")
             
-            # Debug: verificar valores únicos de transaction_metric
-            unique_metrics = elastic_df['transaction_metric'].unique()
-            self.logger.info(f"Valores únicos de transaction_metric: {unique_metrics}")
-            
-            # Verificar si existe la columna selected_reference_code en elastic_df
+            # Verificar columnas necesarias
             if 'selected_reference_code' not in elastic_df.columns:
                 raise ValueError("Columna 'selected_reference_code' no encontrada en datos de Elasticsearch")
             
-            # Filtrar solo transacciones de cliente
-            client_transactions = elastic_df[elastic_df['transaction_metric'] == 'client'].copy()
-            self.logger.info(f"Transacciones encontradas con transaction_metric='client': {len(client_transactions)}")
-            
-            if len(client_transactions) == 0:
-                # Intentar con otros valores posibles
-                self.logger.warning("No se encontraron transacciones con 'client'. Intentando con otros valores...")
-                # Probar con valores que contengan 'client' o similares
-                possible_client_values = [val for val in unique_metrics if val and ('client' in val.lower() or 'user' in val.lower())]
-                self.logger.info(f"Valores posibles para cliente: {possible_client_values}")
-                
-                if possible_client_values:
-                    # Usar el primer valor que contenga 'client' o 'user'
-                    client_value = possible_client_values[0]
-                    client_transactions = elastic_df[elastic_df['transaction_metric'] == client_value].copy()
-                    self.logger.info(f"Usando '{client_value}' como valor de cliente. Transacciones encontradas: {len(client_transactions)}")
+            # Clasificación explícita
+            client_transactions = elastic_df[elastic_df['transaction_metric'].isin(CLIENT_METRICS)].copy()
+            manual_transactions = elastic_df[elastic_df['transaction_metric'] == MANUAL_METRIC].copy()
+            self.logger.info(f"Transacciones cliente: {len(client_transactions)} | manuales: {len(manual_transactions)}")
             
             # Contar apariciones por selected_reference_code
             reference_counts = client_transactions.groupby('selected_reference_code').size().reset_index(name='count')
@@ -131,23 +119,6 @@ class ReferenceAnalyzer:
                 how='left'
             )
             filtered_references.rename(columns={'count': 'cliente_appearances'}, inplace=True)
-            
-            # Contar transacciones manuales para cada referencia
-            manual_transactions = elastic_df[elastic_df['transaction_metric'] == 'manual'].copy()
-            if len(manual_transactions) == 0:
-                # Intentar encontrar valores para manuales - incluir WSREFERENCEIMAGEAC01 y WSPROCESSCOMPLETED
-                possible_manual_values = [val for val in unique_metrics if val and (
-                    'manual' in val.lower() or 
-                    'WSREFERENCEIMAGEAC' in val or 
-                    'image' in val.lower() or
-                    'AC01' in val or
-                    'WSPROCESSCOMPLETED' in val or
-                    'PROCESSCOMPLETED' in val
-                )]
-                if possible_manual_values:
-                    manual_value = possible_manual_values[0]
-                    manual_transactions = elastic_df[elastic_df['transaction_metric'] == manual_value].copy()
-                    self.logger.info(f"Usando '{manual_value}' como valor manual. Transacciones encontradas: {len(manual_transactions)}")
             
             manual_counts = manual_transactions.groupby('selected_reference_code').size().reset_index(name='manual_count')
             
@@ -184,38 +155,8 @@ class ReferenceAnalyzer:
         try:
             analysis_results = []
             
-            # Detectar valores dinámicos de transaction_metric igual que en filter_references_by_appearances
-            unique_metrics = elastic_df['transaction_metric'].unique()
-            self.logger.info(f"Detectando valores de transaction_metric para análisis: {unique_metrics}")
-            
-            # Determinar valor para transacciones de cliente
-            client_metric = 'client'
-            if 'client' not in unique_metrics:
-                # Buscar valores que contengan 'user' o 'client'
-                possible_client_values = [val for val in unique_metrics if val and ('client' in val.lower() or 'user' in val.lower())]
-                if possible_client_values:
-                    client_metric = possible_client_values[0]
-                    self.logger.info(f"Usando '{client_metric}' como valor de cliente para análisis")
-                else:
-                    # Si no encontramos nada específico, usar el primer valor disponible
-                    client_metric = unique_metrics[0] if len(unique_metrics) > 0 else 'client'
-                    self.logger.info(f"Usando '{client_metric}' como valor por defecto para análisis")
-            
-            # Determinar valor para transacciones manuales
-            manual_metric = 'manual'
-            if 'manual' not in unique_metrics:
-                # Buscar valores que contengan 'manual', 'WSREFERENCEIMAGEAC', 'IMAGE' o 'PROCESSCOMPLETED'
-                possible_manual_values = [val for val in unique_metrics if val and (
-                    'manual' in val.lower() or 
-                    'WSREFERENCEIMAGEAC' in val or 
-                    'image' in val.lower() or
-                    'AC01' in val or
-                    'WSPROCESSCOMPLETED' in val or
-                    'PROCESSCOMPLETED' in val
-                )]
-                if possible_manual_values:
-                    manual_metric = possible_manual_values[0]
-                    self.logger.info(f"Usando '{manual_metric}' como valor manual para análisis")
+            client_metric = CLIENT_METRICS
+            manual_metric = MANUAL_METRIC
             
             # Optimización: Convertir label_id en labels_data una sola vez fuera del bucle
             if labels_data is not None and not labels_data.empty and 'label_id' in labels_data.columns:
@@ -240,7 +181,7 @@ class ReferenceAnalyzer:
                 ref_transactions = elastic_df[elastic_df['selected_reference_code'] == reference_code].copy()
                 
                 # Separar por tipo de transacción usando los valores detectados
-                client_trans = ref_transactions[ref_transactions['transaction_metric'] == client_metric]
+                client_trans = ref_transactions[ref_transactions['transaction_metric'].isin(client_metric)]
                 manual_trans = ref_transactions[ref_transactions['transaction_metric'] == manual_metric]
                 
                 self.logger.debug(f"Referencia {reference_code}: {len(ref_transactions)} total, {len(client_trans)} cliente, {len(manual_trans)} manual")
@@ -740,9 +681,9 @@ class ReferenceAnalyzer:
                     if not ref_transactions.empty:
                         refs_with_data += 1
                         
-                        # Separar por tipo de transacción
-                        client_trans = ref_transactions[ref_transactions['transaction_metric'] == client_metric]
-                        manual_trans = ref_transactions[ref_transactions['transaction_metric'] == manual_metric]
+                        # Separar por tipo de transacción (clasificación fija)
+                        client_trans = ref_transactions[ref_transactions['transaction_metric'].isin(CLIENT_METRICS)]
+                        manual_trans = ref_transactions[ref_transactions['transaction_metric'] == MANUAL_METRIC]
                         
                         # Contar trained/not_trained para determinar estado de entrenamiento
                         if 'selected_reference_is_trained' in client_trans.columns:
@@ -769,11 +710,13 @@ class ReferenceAnalyzer:
                                 pct_ok_sistema = (ok_sistema_count / total_client * 100)
                                 enriched_df.at[idx, 'pct_ok_sistema'] = round(pct_ok_sistema, 2)
                             
-                            # %Ok del modelo (basado en columna 'Ok_modelo')
-                            if 'Ok_modelo' in client_trans.columns:
-                                ok_modelo_count = (client_trans['Ok_modelo'] == 1).sum()
-                                pct_ok_modelo = (ok_modelo_count / total_client * 100)
-                                enriched_df.at[idx, 'pct_ok_modelo'] = round(pct_ok_modelo, 2)
+                            # %Ok del modelo (solo sobre transacciones entrenadas)
+                            if 'Ok_modelo' in client_trans.columns and 'selected_reference_is_trained' in client_trans.columns:
+                                trained_subset = client_trans[client_trans['selected_reference_is_trained'] == True]
+                                if len(trained_subset) > 0:
+                                    ok_modelo_count = (trained_subset['Ok_modelo'] == 1).sum()
+                                    pct_ok_modelo = (ok_modelo_count / len(trained_subset) * 100)
+                                    enriched_df.at[idx, 'pct_ok_modelo'] = round(pct_ok_modelo, 2)
                             
                             # Calcular top 3 result_index más frecuentes
                             self.logger.debug(f"Calculando top 3 result_index para referencia {reference_code}")
@@ -912,30 +855,8 @@ class ReferenceAnalyzer:
             manual_transactions = pd.DataFrame()
             
             if elastic_df is not None and not elastic_df.empty:
-                unique_metrics = elastic_df['transaction_metric'].unique()
-                client_metric = 'client'
-                if 'client' not in unique_metrics:
-                    possible_client_values = [val for val in unique_metrics if val and ('client' in val.lower() or 'user' in val.lower())]
-                    if possible_client_values:
-                        client_metric = possible_client_values[0]
-                
-                manual_metric = 'manual'
-                if 'manual' not in unique_metrics:
-                    # Buscar valores que contengan 'manual', 'WSREFERENCEIMAGEAC', 'IMAGE' o 'PROCESSCOMPLETED'
-                    possible_manual_values = [val for val in unique_metrics if val and (
-                        'manual' in val.lower() or 
-                        'WSREFERENCEIMAGEAC' in val or 
-                        'image' in val.lower() or
-                        'AC01' in val or
-                        'WSPROCESSCOMPLETED' in val or
-                        'PROCESSCOMPLETED' in val
-                    )]
-                    if possible_manual_values:
-                        manual_metric = possible_manual_values[0]
-                        self.logger.info(f"Usando '{manual_metric}' como valor manual")
-                
-                client_transactions = elastic_df[elastic_df['transaction_metric'] == client_metric].copy()
-                manual_transactions = elastic_df[elastic_df['transaction_metric'] == manual_metric].copy()
+                client_transactions = elastic_df[elastic_df['transaction_metric'].isin(CLIENT_METRICS)].copy()
+                manual_transactions = elastic_df[elastic_df['transaction_metric'] == MANUAL_METRIC].copy()
             
             # Preparar resultados
             results = {
@@ -982,32 +903,8 @@ class ReferenceAnalyzer:
             
             self.logger.info(f"Analizando devices desde {len(elastic_df)} transacciones")
             
-            # Detectar valores de transaction_metric igual que en otras funciones
-            unique_metrics = elastic_df['transaction_metric'].unique()
-            self.logger.info(f"Valores de transaction_metric disponibles: {unique_metrics}")
-            
-            # Determinar valor para transacciones de cliente
-            client_metric = 'client'
-            if 'client' not in unique_metrics:
-                possible_client_values = [val for val in unique_metrics if val and ('client' in val.lower() or 'user' in val.lower())]
-                if possible_client_values:
-                    client_metric = possible_client_values[0]
-                    self.logger.info(f"Usando '{client_metric}' como valor de cliente para devices")
-            
-            # Determinar valor para transacciones manuales
-            manual_metric = 'manual'
-            if 'manual' not in unique_metrics:
-                possible_manual_values = [val for val in unique_metrics if val and (
-                    'manual' in val.lower() or 
-                    'WSREFERENCEIMAGEAC' in val or 
-                    'image' in val.lower() or
-                    'AC01' in val or
-                    'WSPROCESSCOMPLETED' in val or
-                    'PROCESSCOMPLETED' in val
-                )]
-                if possible_manual_values:
-                    manual_metric = possible_manual_values[0]
-                    self.logger.info(f"Usando '{manual_metric}' como valor manual para devices")
+            # Clasificación fija
+            manual_metric = MANUAL_METRIC
             
             # Agrupar por device_id y calcular estadísticas
             devices_stats = []
@@ -1019,7 +916,7 @@ class ReferenceAnalyzer:
                 device_data = elastic_df[elastic_df['device_id'] == device_id].copy()
                 
                 # Separar por tipo de transacción usando valores detectados
-                client_data = device_data[device_data['transaction_metric'] == client_metric]
+                client_data = device_data[device_data['transaction_metric'].isin(CLIENT_METRICS)]
                 manual_data = device_data[device_data['transaction_metric'] == manual_metric]
                 
                 # Calcular estadísticas básicas
@@ -1046,6 +943,16 @@ class ReferenceAnalyzer:
                 # Obtener nombre del device si está disponible
                 device_name = device_data['device_name'].iloc[0] if 'device_name' in device_data.columns else device_id
                 
+                # Fecha primera transacción del device
+                first_ts = None
+                if 'transaction_start_time' in device_data.columns:
+                    try:
+                        ts_series = pd.to_datetime(device_data['transaction_start_time'], errors='coerce')
+                        if not ts_series.dropna().empty:
+                            first_ts = ts_series.min().strftime('%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        first_ts = None
+
                 devices_stats.append({
                     'device_id': device_id,
                     'device_name': device_name,
@@ -1053,7 +960,8 @@ class ReferenceAnalyzer:
                     'num_manual': num_manual,
                     'pct_ok_sistema': round(pct_ok_sistema, 1),
                     'pct_ok_modelo': round(pct_ok_modelo, 1),
-                    'revisar_imagenes': 'no'  # Por defecto 'no'
+                    'revisar_imagenes': 'no',  # Por defecto 'no'
+                    'first_transaction_date': first_ts
                 })
             
             devices_df = pd.DataFrame(devices_stats)

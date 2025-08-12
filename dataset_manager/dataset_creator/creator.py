@@ -18,6 +18,8 @@ import boto3
 from botocore.exceptions import ClientError
 from datetime import datetime
 import re
+from utils.file_manager import read_csv_sc, is_file_locked, wait_for_writable
+from utils.report_excel_manager import ReportExcelManager, ExcelLockedError
 
 
 class DatasetCreator:
@@ -166,9 +168,9 @@ class DatasetCreator:
             self.logger.info(f"✅ Referencias válidas para dataset: {len(df_references)}")
             self.logger.info(f"⏱️  Tiempo referencias: {time.time()-t_refs0:.2f}s")
             
-            # 4. Crear estructura de carpetas
-            class_structure = self._create_class_structure(df_references, dataset_folder, dry_run)
-            self.logger.info(f"🏷️  Clases creadas: {len(class_structure)}")
+            # 4. (Lazy) No crear estructura completa aún; se creará al descargar imágenes
+            class_structure = {}
+            self.logger.info("🏷️  Creación diferida de carpetas (solo cuando haya imágenes)")
             
             # 5. Cargar datos de Elasticsearch
             t_es0 = time.time()
@@ -300,8 +302,7 @@ class DatasetCreator:
             missing_cols = [col for col in required_cols if col not in df.columns]
             if missing_cols:
                 raise ValueError(f"Columnas faltantes en 'references': {missing_cols}")
-
-            # Filtrar solo las que deben incluirse en el dataset (aceptar 'si' y 'sí', case-insensitive)
+            # Filtrar solo las que deben incluirse en el dataset (si existe la columna)
             if 'incluir_dataset' in df.columns:
                 mask_si = (
                     df['incluir_dataset']
@@ -311,17 +312,35 @@ class DatasetCreator:
                     .isin(['si', 'sí'])
                 )
                 df_valid = df[mask_si].copy()
+                self.logger.info(f"Referencias totales: {len(df)} | Marcadas incluir_dataset=si: {len(df_valid)}")
             else:
                 df_valid = df.copy()
+                self.logger.info(f"Referencias totales (sin columna incluir_dataset): {len(df_valid)}")
 
-            # Limpiar y validar datos
-            df_valid = df_valid.dropna(subset=required_cols)
-            df_valid['class'] = df_valid['producto_a_entrenar'].str.strip()
+            # Detectar filas con campos obligatorios vacíos (antes de dropear)
+            missing_mask = (
+                df_valid['producto_a_entrenar'].isna() | (df_valid['producto_a_entrenar'].astype(str).str.strip() == '') |
+                df_valid['label_considerar'].isna() | (df_valid['label_considerar'].astype(str).str.strip() == '')
+            )
+            problematic = df_valid[missing_mask]
+            if not problematic.empty:
+                cols_show = ['reference_name', 'producto_a_entrenar', 'label_considerar']
+                preview = problematic[cols_show].head(50)
+                self.logger.error("Referencias con campos obligatorios vacíos (producto_a_entrenar / label_considerar):")
+                self.logger.error("\n" + preview.to_string(index=False))
+                raise ValueError(f"Se encontraron {len(problematic)} referencias con datos incompletos. Corrige el Excel y reintenta.")
+
+            # Limpiar y validar datos (ya sabemos que no faltan obligatorios)
+            df_valid['class'] = df_valid['producto_a_entrenar'].astype(str).str.strip()
             df_valid['label_id'] = pd.to_numeric(df_valid['label_considerar'], errors='coerce')
-            df_valid = df_valid.dropna(subset=['label_id'])
-            
+            if df_valid['label_id'].isna().any():
+                invalid_label = df_valid[df_valid['label_id'].isna()][['reference_name','label_considerar']].head(50)
+                self.logger.error("Referencias con label_considerar no numérico:")
+                self.logger.error("\n" + invalid_label.to_string(index=False))
+                raise ValueError("Existen valores no numéricos en label_considerar. Corrige y reintenta.")
+
             if df_valid.empty:
-                raise ValueError("No hay referencias válidas para procesar")
+                raise ValueError("No hay referencias válidas para procesar tras validación")
             
             return df_valid
             
@@ -352,31 +371,33 @@ class DatasetCreator:
         return class_structure
 
     def _load_elasticsearch_data(self, excel_path: str) -> pd.DataFrame:
-        """Cargar datos de Elasticsearch optimizado"""
+        """Cargar datos de Elasticsearch desde el CSV externo (elastic_data.csv)."""
         try:
-            # Cargar solo las columnas esenciales para mejor rendimiento
-            essential_columns = ['transaction_id', 'selected_reference_code', 'device_id', 'image_link', 'transaction_start_time']
-            
-            # Intentar cargar con columnas específicas
-            try:
-                df = pd.read_excel(excel_path, sheet_name='Datos_Elasticsearch', usecols=essential_columns)
-                self.logger.info(f"📊 Datos de Elasticsearch cargados con {len(essential_columns)} columnas esenciales")
-            except ValueError:
-                # Si no se pueden cargar las columnas específicas, cargar todo
-                df = pd.read_excel(excel_path, sheet_name='Datos_Elasticsearch')
-                self.logger.info(f"📊 Datos de Elasticsearch cargados con todas las columnas ({len(df.columns)})")
-            
-            # Validar columnas críticas
-            critical_columns = ['transaction_id', 'selected_reference_code', 'image_link']
-            missing_critical = [col for col in critical_columns if col not in df.columns]
-            if missing_critical:
-                raise ValueError(f"Columnas críticas faltantes: {missing_critical}")
-            
-            # Limpiar datos
-            df = df.dropna(subset=critical_columns)
-            
-            return df
-            
+            # CSV ahora se guarda en reports/<process_name>/reports/elastic_data.csv o en la carpeta reports raíz del proceso
+            # Buscar primero en carpeta reports del proceso activo
+            candidates = []
+            reports_dir = self.process_dir / 'reports'
+            if reports_dir.exists():
+                candidates.append(reports_dir / 'elastic_data.csv')
+            # Legacy fallback: carpeta data/elastic_cache.csv (antiguo) por compatibilidad temporal
+            legacy = self.process_dir / 'data' / 'elastic_cache.csv'
+            if legacy.exists():
+                candidates.append(legacy)
+            for path in candidates:
+                if path.exists():
+                    try:
+                        df = read_csv_sc(str(path))
+                        self.logger.info(f"⚡ Cargado datos Elasticsearch desde CSV: {path} ({len(df)} filas)")
+                        # Validar columnas mínimas
+                        critical_columns = ['transaction_id', 'selected_reference_code', 'image_link']
+                        missing_critical = [col for col in critical_columns if col not in df.columns]
+                        if missing_critical:
+                            raise ValueError(f"Columnas críticas faltantes en CSV {path}: {missing_critical}")
+                        df = df.dropna(subset=critical_columns)
+                        return df
+                    except Exception as ce:
+                        self.logger.warning(f"Problema leyendo {path}: {ce}")
+            raise FileNotFoundError("No se encontró elastic_data.csv. Ejecute primero la extracción (download_info).")
         except Exception as e:
             self.logger.error(f"Error cargando datos de Elasticsearch: {e}")
             raise
@@ -884,7 +905,7 @@ class DatasetCreator:
                     .astype(str)
                     .str.lower()
                     .str.strip()
-                    .isin(['si', 'sí'])
+                    .isin(['si'])
                 )
                 before = len(df_devices)
                 df_devices = df_devices[mask_inc].copy()
@@ -892,7 +913,7 @@ class DatasetCreator:
             # Recargar referencias desde Excel (garantizar incluir_dataset == 'sí')
             try:
                 df_refs_full = pd.read_excel(excel_path, sheet_name='References')
-                mask_si = df_refs_full.get('incluir_dataset', pd.Series(dtype=str)).astype(str).str.lower().str.strip().isin(['si', 'sí'])
+                mask_si = df_refs_full.get('incluir_dataset', pd.Series(dtype=str)).astype(str).str.lower().str.strip().isin(['si'])
                 df_refs_incluir = df_refs_full[mask_si].copy()
             except Exception:
                 df_refs_incluir = df_references.copy()
@@ -1112,62 +1133,46 @@ class DatasetCreator:
             
             print(f"\n💾 Guardando registro del dataset en Excel...")
             print(f"📊 Total de registros: {len(df_log)}")
-            
-            # Intentar guardar con manejo de archivo abierto (no interactivo)
+
+            manager = ReportExcelManager(excel_path, interactive=True, max_retries=5, retry_wait=1.5)
             try:
-                    import openpyxl
-                    from openpyxl.utils.dataframe import dataframe_to_rows
-                    
-                    # Cargar workbook existente
-                    workbook = openpyxl.load_workbook(excel_path)
-                    
-                    # Verificar si ya existe la hoja
-                    if sheet_name in workbook.sheetnames:
-                        # Cargar datos existentes
-                        existing_df = pd.read_excel(excel_path, sheet_name=sheet_name)
-                        # Normalizar columnas origen/dataset_original en existente
-                        if 'origen' not in existing_df.columns:
-                            existing_df['origen'] = 'crear_dataset'
-                        if 'dataset_original' not in existing_df.columns:
-                            existing_df['dataset_original'] = ''
-                        # Combinar con nuevos datos
-                        combined_df = pd.concat([existing_df, df_log], ignore_index=True)
-                        self.logger.info(f"📝 Añadiendo {len(df_log)} registros a {len(existing_df)} existentes")
-                        
-                        # Eliminar hoja existente
-                        del workbook[sheet_name]
-                    else:
-                        combined_df = df_log
-                        self.logger.info(f"📝 Creando nueva hoja con {len(df_log)} registros")
-                    
-                    # Crear nueva hoja y posicionarla inmediatamente después de 'Devices' si existe
-                    insert_after = None
-                    if 'Devices' in workbook.sheetnames:
-                        insert_after = workbook.sheetnames.index('Devices') + 1
-                    sheet = workbook.create_sheet(sheet_name, index=insert_after if insert_after is not None else None)
-                    
-                    # Escribir datos combinados
-                    for r in dataframe_to_rows(combined_df, index=False, header=True):
-                        sheet.append(r)
-                    
-                    # Guardar archivo
-                    workbook.save(excel_path)
-                    
-                    print(f"✅ Registro guardado en hoja '{sheet_name}'")
-                    print(f"📊 Total de registros en la hoja: {len(combined_df)}")
-                    return
-            except PermissionError:
-                # Avisar y no crear ficheros extra
-                self.logger.warning("⚠️  El Excel está abierto. Cierre el archivo para permitir guardar el log de dataset.")
+                manager.wait_until_unlocked()
+            except ExcelLockedError as e:
+                self.logger.error(f"No se pudo guardar registro (Excel abierto): {e}")
+                print("⚠ Cierra el Excel y vuelve a ejecutar para registrar datasets_creados.")
                 return
+
+            def _modify(wb):
+                from openpyxl.utils.dataframe import dataframe_to_rows
+                if sheet_name in wb.sheetnames:
+                    existing_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+                    if 'origen' not in existing_df.columns:
+                        existing_df['origen'] = 'crear_dataset'
+                    if 'dataset_original' not in existing_df.columns:
+                        existing_df['dataset_original'] = ''
+                    combined_df = pd.concat([existing_df, df_log], ignore_index=True)
+                    self.logger.info(f"📝 Añadiendo {len(df_log)} registros a {len(existing_df)} existentes")
+                    del wb[sheet_name]
+                else:
+                    combined_df = df_log
+                    self.logger.info(f"📝 Creando nueva hoja con {len(df_log)} registros")
+                pos = None
+                if 'Devices' in wb.sheetnames:
+                    pos = wb.sheetnames.index('Devices') + 1
+                sheet = wb.create_sheet(sheet_name, index=pos if pos is not None else None)
+                for r in dataframe_to_rows(combined_df, index=False, header=True):
+                    sheet.append(r)
+                sheet._final_count = len(combined_df)
+
+            manager.save_with_validations(_modify)
+            try:
+                final_count = len(pd.read_excel(excel_path, sheet_name=sheet_name))
+            except Exception:
+                final_count = 'desconocido'
+            print(f"✅ Registro guardado en hoja '{sheet_name}'")
+            print(f"📊 Total de registros en la hoja: {final_count}")
+            return
                         
         except Exception as e:
             self.logger.error(f"Error guardando registro de dataset: {e}")
-            # Fallback: crear archivo separado
-            try:
-                backup_path = excel_path.replace('.xlsx', f'_dataset_{dataset_folder.name}.xlsx')
-                df_log = pd.DataFrame(self.downloaded_images_log)
-                df_log.to_excel(backup_path, index=False, sheet_name='datasets_creados')
-                print(f"💾 Registro guardado en archivo de respaldo: {backup_path}")
-            except Exception as e2:
-                self.logger.error(f"Error incluso en archivo de respaldo: {e2}")
+            print("❌ No se guardó el registro (no se genera backup alternativo).")

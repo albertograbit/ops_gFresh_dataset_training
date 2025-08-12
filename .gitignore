@@ -95,3 +95,6 @@ Thumbs.db
 # Archivos de configuración específicos del usuario
 config_local.yaml
 settings_local.yaml
+
+
+config/active_process.json

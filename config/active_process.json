@@ -1,9 +1,9 @@
 {
-  "name": "dataset_101_120825_v3",
-  "created_at": "2025-08-12T13:22:45.712023",
-  "process_dir": "C:\\Users\\AlbertoGómez\\Desarrollo local\\ops_gFresh_dataset_training\\output\\processes\\dataset_101_120825_v3",
+  "name": "dataset_125_120825_v2",
+  "created_at": "2025-08-12T13:36:24.582633",
+  "process_dir": "C:\\Users\\AlbertoGómez\\Desarrollo local\\ops_gFresh_dataset_training\\output\\processes\\dataset_125_120825_v2",
   "metadata": {
-    "deployment_id": 101,
+    "deployment_id": 125,
     "days_back": 2,
     "download_images": false,
     "generate_reports": true,

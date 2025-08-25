@@ -14,7 +14,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 import yaml
-import boto3
 from botocore.exceptions import ClientError
 from datetime import datetime
 import re
@@ -63,11 +62,19 @@ class DatasetCreator:
             self.process_dir = Path('./output')
             self.process_name = 'default'
         
-        # Configuración de S3
-        self.s3_bucket = os.getenv('S3_BUCKET', 'grabit-data')
-        self.s3_region = os.getenv('REMOTE_STORAGE_REGION', 'eu-west-2')
-        self.aws_access_key_id = os.getenv('REMOTE_STORAGE_ACCESS_KEY')
-        self.aws_secret_access_key = os.getenv('REMOTE_STORAGE_SECRET_KEY')
+        # Configuración de almacenamiento (S3 / MinIO) centralizada
+        try:
+            from dataset_manager.storage.storage_client import get_storage_client
+            self.s3_client, storage_env = get_storage_client(self.logger, validate=True)
+            self.s3_bucket = storage_env.bucket
+            self.s3_region = storage_env.region
+            self.storage_type = storage_env.storage_type
+        except Exception as e:
+            self.logger.warning(f"Fallo inicializando cliente de almacenamiento compartido: {e}. Se intentará inicialización diferida mínima.")
+            self.s3_client = None
+            self.s3_bucket = os.getenv('S3_BUCKET', 'grabit-data')
+            self.s3_region = os.getenv('REMOTE_STORAGE_REGION', 'eu-west-2')
+            self.storage_type = 's3'
         
         # Configuración de descarga
         self.download_timeout = 30
@@ -86,32 +93,24 @@ class DatasetCreator:
             self.download_max_workers = max(1, int(getattr(_settings.image_processing, 'max_workers', 5)))
         except Exception:
             self.download_max_workers = 5
-        
-        # Inicializar cliente S3
-        self._init_s3_client()
-        
+
         self.logger.info(f"DatasetCreator inicializado:")
         self.logger.info(f"  - Proceso: {self.process_name}")
         self.logger.info(f"  - Directorio base: {self.process_dir}")
-        self.logger.info(f"  - S3 Bucket: {self.s3_bucket}")
+        self.logger.info(f"  - Bucket: {self.s3_bucket} (tipo={getattr(self,'storage_type','s3')})")
 
     def _init_s3_client(self):
-        """Inicializar cliente de S3 con credenciales"""
-        try:
-            if self.aws_access_key_id and self.aws_secret_access_key:
-                self.s3_client = boto3.client(
-                    's3',
-                    region_name=self.s3_region,
-                    aws_access_key_id=self.aws_access_key_id,
-                    aws_secret_access_key=self.aws_secret_access_key
-                )
-                self.logger.info("Cliente S3 inicializado con credenciales del .env")
-            else:
-                self.s3_client = boto3.client('s3', region_name=self.s3_region)
-                self.logger.info("Cliente S3 inicializado con credenciales por defecto")
-        except Exception as e:
-            self.logger.error(f"Error inicializando cliente S3: {e}")
-            self.s3_client = None
+        """Mantener método por compatibilidad; ya se usa almacenamiento compartido."""
+        if self.s3_client is None:
+            try:
+                from dataset_manager.storage.storage_client import get_storage_client
+                self.s3_client, storage_env = get_storage_client(self.logger, validate=False)
+                self.s3_bucket = storage_env.bucket
+                self.s3_region = storage_env.region
+                self.storage_type = storage_env.storage_type
+            except Exception as e:
+                self.logger.error(f"No se pudo inicializar cliente de almacenamiento: {e}")
+                self.s3_client = None
 
     def crear_dataset(self, deployment_id: int, excel_path: Optional[str] = None, 
                      dry_run: bool = False, force: bool = False,
@@ -608,6 +607,10 @@ class DatasetCreator:
                 return False
             
             image_link = transaction.get('image_link')
+            if isinstance(image_link, str):
+                image_link = image_link.strip().strip('"').strip("'")
+                if image_link.lower() in ('none', 'null'):  # normalizar
+                    image_link = ''
             if not image_link or pd.isna(image_link):
                 return False
             
@@ -750,6 +753,10 @@ class DatasetCreator:
                 return False
             
             image_link = transaction.get('image_link')
+            if isinstance(image_link, str):
+                image_link = image_link.strip().strip('"').strip("'")
+                if image_link.lower() in ('none', 'null'):
+                    image_link = ''
             if not image_link or pd.isna(image_link):
                 return False
             
@@ -818,24 +825,35 @@ class DatasetCreator:
             return False
 
     def _list_s3_objects(self, prefix: str) -> List[str]:
-        """Listar objetos en S3 con un prefijo dado"""
+        """Listar objetos en S3 (o MinIO) que correspondan a un archivo o prefijo de carpeta.
+
+        Mejora respecto a versión previa:
+         - Si prefix ya parece un archivo (tiene extensión válida) se intenta head_object directo.
+         - Aumenta MaxKeys a 100 para tener más opciones.
+         - Logging de diagnóstico cuando no se encuentran imágenes.
+        """
         try:
+            if any(prefix.lower().endswith(ext) for ext in self.image_extensions):
+                try:
+                    self.s3_client.head_object(Bucket=self.s3_bucket, Key=prefix)
+                    return [prefix]
+                except Exception:
+                    # Continuar a listado por si es un folder mal formateado
+                    pass
             response = self.s3_client.list_objects_v2(
                 Bucket=self.s3_bucket,
                 Prefix=prefix,
-                MaxKeys=10
+                MaxKeys=100
             )
-            
-            objects = []
+            objects: List[str] = []
             if 'Contents' in response:
                 for obj in response['Contents']:
                     key = obj['Key']
-                    # Filtrar solo archivos de imagen
                     if any(key.lower().endswith(ext) for ext in self.image_extensions):
                         objects.append(key)
-            
+            if not objects:
+                self.logger.debug(f"Sin imágenes para prefijo '{prefix}' en bucket {self.s3_bucket}")
             return objects
-            
         except Exception as e:
             self.logger.debug(f"Error listando objetos S3 con prefijo {prefix}: {e}")
             return []

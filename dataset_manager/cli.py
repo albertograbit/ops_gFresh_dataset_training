@@ -66,6 +66,11 @@ Ejemplos de uso:
         type=str,
         help='Nombre de environment (usa .env_<env>; si no se indica usa .env)'
     )
+    parser.add_argument(
+        '--env-file',
+        type=str,
+        help='Ruta explícita a archivo .env (tiene prioridad sobre --env)'
+    )
     
     # Subcomandos
     subparsers = parser.add_subparsers(
@@ -348,9 +353,21 @@ def handle_download_info_command(args):
             'download_images': False,  # download_info nunca descarga imágenes
             'generate_reports': not args.no_reports,
             'model_id': getattr(args, 'model', None),
-            'base_model_id': getattr(args, 'base_model_id', None)
+            'base_model_id': getattr(args, 'base_model_id', None),
+            'env_name': getattr(args, 'env', None),
+            'env_file': getattr(args, 'env_file', None) or os.environ.get('DM_ACTIVE_ENV_FILE')
         }
         process_manager.set_active_process(process_name, process_metadata)
+
+        # IMPORTANTE: Ya no copiamos el .env por motivos de seguridad. Solo registramos ruta absoluta.
+        try:
+            if process_metadata.get('env_file'):
+                abs_env = Path(process_metadata['env_file']).resolve()
+                process_metadata['env_file'] = str(abs_env)
+                process_manager.set_active_process(process_name, process_metadata)
+        except Exception as _ce:
+            if args.verbose:
+                print(f"Aviso: no se pudo normalizar ruta de env file: {_ce}")
         
         # Configurar settings personalizados
         base_settings = Settings(args.config)
@@ -541,6 +558,10 @@ def handle_active_process_command(args):
                 print(f"  • Model ID: {metadata['model_id']}")
             if metadata.get('base_model_id'):
                 print(f"  • Base Model ID: {metadata['base_model_id']}")
+            if metadata.get('env_name'):
+                print(f"  • Entorno (env): {metadata['env_name']}")
+            if metadata.get('env_file'):
+                print(f"  • Fichero .env: {metadata['env_file']}")
         
         return 0
         
@@ -554,70 +575,68 @@ def handle_active_process_command(args):
 
 def handle_create_dataset_command(args):
     """Maneja el comando crear_dataset"""
+    from dataset_manager.dataset_creator.creator import DatasetCreator
+    from dataset_manager.process_logger import ProcessLoggerManager
+    from dotenv import load_dotenv
+    from pathlib import Path
+    import logging
+
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
     try:
-        # Importar el módulo de creación de datasets
-        from dataset_manager.dataset_creator.creator import DatasetCreator
-        from dataset_manager.process_logger import ProcessLoggerManager
-        import logging
-        
-        # Configurar logging
-        level = logging.DEBUG if args.verbose else logging.INFO
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        logger = logging.getLogger(__name__)
-        
-        # Usar configuración consciente de procesos
         process_aware_settings = ProcessAwareSettings(args.config)
-        
-        # Verificar si hay proceso activo
         process_info = process_aware_settings.get_process_info()
         if not process_info:
-            logger.error("❌ No hay proceso activo. Ejecute primero 'download_info' para crear un proceso.")
+            logger.error("❌ No hay proceso activo. Ejecute primero 'download_info'.")
             return 1
-        
-        # Obtener deployment_id del proceso activo
+
+        # Recargar entorno del proceso
+        try:
+            md = process_info.get('metadata', {})
+            proc_env_file = md.get('env_file')
+            if not proc_env_file and md.get('env_name'):
+                candidate = f".env_{md['env_name']}"
+                if os.path.exists(candidate):
+                    proc_env_file = candidate
+            if proc_env_file and os.path.exists(proc_env_file):
+                for k in list(os.environ.keys()):
+                    if k.startswith(('ELASTIC_', 'DB_PROD_RO_', 'REMOTE_STORAGE_', 'MINIO_', 'S3_BUCKET')):
+                        os.environ.pop(k, None)
+                load_dotenv(proc_env_file, override=True)
+                os.environ['DM_ACTIVE_ENV_FILE'] = str(Path(proc_env_file).resolve())
+                if md.get('env_name'):
+                    os.environ['DM_ACTIVE_ENV'] = md['env_name']
+                logger.info(f"Entorno recargado: {proc_env_file}")
+        except Exception as _ce:
+            logger.warning(f"No se pudo recargar entorno: {_ce}")
+
         deployment_id = process_info.get('metadata', {}).get('deployment_id')
         if not deployment_id:
             logger.error("❌ El proceso activo no tiene deployment_id válido.")
             return 1
-        
-        # Setup process logger
+
         process_directory = process_info.get('process_dir') or process_info.get('directory')
-        if process_directory:
-            process_logger = ProcessLoggerManager.get_logger(
-                process_info['name'], 
-                process_directory
-            )
-        else:
-            process_logger = None
-        
+        process_logger = ProcessLoggerManager.get_logger(process_info['name'], process_directory) if process_directory else None
         if process_logger:
             process_logger.log_command_start(
-                "create_dataset",
+                'create_dataset',
                 f"Creación de dataset - deployment {deployment_id} - dry_run: {'Sí' if args.dry_run else 'No'}"
             )
-        
-        # Crear dataset creator con configuración consciente de procesos
+
         creator = DatasetCreator(config_path=args.config, process_aware=True)
-        
+        logger.info(f"Storage detectado: bucket={getattr(creator,'s3_bucket',None)} tipo={getattr(creator,'storage_type','?')} región={getattr(creator,'s3_region',None)}")
+
         if args.dry_run:
-            logger.info("🔍 MODO DRY-RUN: Solo mostrar qué se haría")
+            logger.info('🔍 MODO DRY-RUN')
             if process_logger:
-                process_logger.log_detailed("Modo DRY-RUN activado - solo simulación")
-        
-        # Mostrar información del proceso activo
-        logger.info(f"📋 Usando proceso activo: {process_info['name']}")
+                process_logger.log_detailed('Modo DRY-RUN activado')
+
+        logger.info(f"📋 Proceso: {process_info['name']}")
         logger.info(f"🎯 Deployment ID: {deployment_id}")
-        logger.info(f"📁 Directorio del proceso: {process_directory}")
-        
-        if process_logger:
-            process_logger.log_detailed(f"Deployment ID: {deployment_id}")
-            process_logger.log_detailed(f"Directorio del proceso: {process_directory}")
-        
-        # Ejecutar creación de dataset
+        logger.info(f"📁 Directorio: {process_directory}")
+
         try:
             results = creator.crear_dataset(
                 deployment_id=deployment_id,
@@ -633,73 +652,40 @@ def handle_create_dataset_command(args):
                 no_filter_used=getattr(args, 'no_filter_used', False)
             )
         except ValueError as e:
-            # Si es un error de validación, mostrar la información de forma prominente
-            error_msg = str(e)
-            if "referencias sin campos requeridos" in error_msg:
-                # Mostrar tabla de validación al final
-                print("\n" + "🔴" * 25 + " PROCESO DETENIDO " + "🔴" * 25)
-                print("La tabla de validación se mostró arriba con los detalles específicos.")
-                print("Corrija los campos faltantes en el Excel y vuelva a ejecutar crear_dataset")
-                print("🔴" * 70)
-            
             if process_logger:
-                process_logger.log_command_result(
-                    "create_dataset",
-                    f"ERROR: {error_msg}",
-                    success=False
-                )
+                process_logger.log_command_result('create_dataset', f'ERROR: {e}', success=False)
+            logger.error(str(e))
             return 1
-        
-        # Mostrar resultados
-        logger.info("🎉 DATASET CREADO EXITOSAMENTE")
-        logger.info("=" * 50)
+
+        logger.info('🎉 DATASET CREADO EXITOSAMENTE')
         logger.info(f"📂 Carpeta dataset: {results['dataset_folder']}")
         logger.info(f"📋 Referencias procesadas: {results['references_processed']}")
         logger.info(f"🏷️  Clases creadas: {results['classes_created']}")
         logger.info(f"📸 Total de imágenes: {results['total_images']}")
         logger.info(f"📊 Archivo Excel: {results['excel_path']}")
-        
-        # Log del proceso
+
         if process_logger:
-            process_logger.log_step_completion("Creación de dataset", {
-                "Carpeta dataset": results['dataset_folder'],
-                "Referencias procesadas": results['references_processed'],
-                "Clases creadas": results['classes_created'],
-                "Total imágenes": results['total_images']
+            process_logger.log_step_completion('Creación de dataset', {
+                'Carpeta dataset': results['dataset_folder'],
+                'Referencias procesadas': results['references_processed'],
+                'Clases creadas': results['classes_created'],
+                'Total imágenes': results['total_images']
             })
-            
-            process_logger.log_command_result(
-                "create_dataset",
-                f"Dataset creado: {results['references_processed']} referencias, {results['classes_created']} clases, {results['total_images']} imágenes",
-                success=True
-            )
-        
-        # Mostrar estructura de carpetas
-        from pathlib import Path
-        dataset_path = Path(results['dataset_folder'])
-        if dataset_path.exists():
-            logger.info("\n📁 Estructura de carpetas creada:")
-            for clase_folder in sorted(dataset_path.iterdir()):
-                if clase_folder.is_dir():
-                    label_folders = list(clase_folder.iterdir())
-                    logger.info(f"   {clase_folder.name}/")
-                    for label_folder in sorted(label_folders):
-                        if label_folder.is_dir():
-                            images_count = len(list(label_folder.glob('*.jpg'))) + len(list(label_folder.glob('*.png')))
-                            logger.info(f"     └── {label_folder.name}/ ({images_count} imágenes)")
-        
-        logger.info(f"\n✅ Proceso completado para deployment {deployment_id}")
+            process_logger.log_command_result('create_dataset', 'Dataset creado', success=True)
+
+        from pathlib import Path as _P
+        ds_path = _P(results['dataset_folder'])
+        if ds_path.exists():
+            for clase_folder in sorted(p for p in ds_path.iterdir() if p.is_dir()):
+                logger.info(f"   {clase_folder.name}/")
+
+        logger.info(f"✅ Proceso completado para deployment {deployment_id}")
         return 0
-        
     except KeyboardInterrupt:
-        logger.info("Creación de dataset cancelada por el usuario")
-        if process_logger:
-            process_logger.log_command_result("create_dataset", "Cancelado por el usuario", success=False)
+        logger.info('Creación de dataset cancelada por el usuario')
         return 1
     except Exception as e:
-        logger.error(f"❌ Error durante la creación del dataset: {str(e)}")
-        if process_logger:
-            process_logger.log_command_result("create_dataset", f"ERROR: {str(e)}", success=False)
+        logger.error(f"❌ Error durante la creación del dataset: {e}")
         if args.verbose:
             import traceback
             traceback.print_exc()
@@ -708,119 +694,124 @@ def handle_create_dataset_command(args):
 
 def handle_review_images_command(args):
     """Maneja el comando review_images"""
+    # Imports locales para aislar dependencias
+    from dataset_manager.image_review.downloader import ImageReviewDownloader
+    from dataset_manager.process_logger import ProcessLoggerManager
+    import logging
+    from pathlib import Path
+    from dotenv import load_dotenv
+
+    # Configurar logging
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger(__name__)
+
     try:
-        # Importar el módulo de revisión de imágenes
-        from dataset_manager.image_review.downloader import ImageReviewDownloader
-        from dataset_manager.process_logger import ProcessLoggerManager
-        import logging
-        
-        # Configurar logging
-        level = logging.DEBUG if args.verbose else logging.INFO
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        logger = logging.getLogger(__name__)
-        
-        # Usar configuración consciente de procesos
         process_aware_settings = ProcessAwareSettings(args.config)
-        
-        # Setup process logger si hay proceso activo
+
+        # Re-cargar entorno guardado en el proceso (si existe)
+        try:
+            proc_info = process_aware_settings.get_process_info()
+            proc_env_file = None
+            if proc_info and proc_info.get('metadata'):
+                md = proc_info['metadata']
+                proc_env_file = md.get('env_file')
+                if not proc_env_file and md.get('env_name'):
+                    candidate = f".env_{md['env_name']}"
+                    if os.path.exists(candidate):
+                        proc_env_file = candidate
+                if proc_env_file and os.path.exists(proc_env_file):
+                    # Limpiar variables sensibles previas
+                    for k in list(os.environ.keys()):
+                        if k.startswith(('ELASTIC_', 'DB_PROD_RO_', 'REMOTE_STORAGE_', 'MINIO_', 'S3_BUCKET')):
+                            os.environ.pop(k, None)
+                    load_dotenv(proc_env_file, override=True)
+                    os.environ['DM_ACTIVE_ENV_FILE'] = str(Path(proc_env_file).resolve())
+                    if md.get('env_name'):
+                        os.environ['DM_ACTIVE_ENV'] = md['env_name']
+                    logger.info(f"Entorno recargado: {proc_env_file}")
+        except Exception as _le:
+            logger.warning(f"No se pudo recargar entorno del proceso: {_le}")
+
+        # Process logger
         process_logger = None
         process_info = process_aware_settings.get_process_info()
         if process_info:
-            # Usar process_dir si está disponible, sino construir el directorio
             process_directory = process_info.get('process_dir') or process_info.get('directory')
             if process_directory:
-                process_logger = ProcessLoggerManager.get_logger(
-                    process_info['name'], 
-                    process_directory
+                process_logger = ProcessLoggerManager.get_logger(process_info['name'], process_directory)
+                process_logger.log_command_start(
+                    'review_images',
+                    f"Descarga de imágenes para revisión - dry_run: {'Sí' if args.dry_run else 'No'}"
                 )
-            process_logger.log_command_start(
-                "review_images",
-                f"Descarga de imágenes para revisión - dry_run: {'Sí' if args.dry_run else 'No'}"
-            )
-        
-        # Crear downloader con configuración adaptada
+
         downloader = ImageReviewDownloader(config_path=args.config, process_aware=True)
         downloader.dry_run = args.dry_run
-        
         if args.dry_run:
-            logger.info("=== MODO DRY-RUN: Solo mostrar qué se haría ===")
+            logger.info('=== MODO DRY-RUN: Solo mostrar qué se haría ===')
             if process_logger:
-                process_logger.log_detailed("Modo DRY-RUN activado - solo simulación")
-        
-        # Mostrar información del proceso activo
+                process_logger.log_detailed('Modo DRY-RUN activado - solo simulación')
+
         if process_info:
             logger.info(f"Usando proceso activo: {process_info['name']}")
-            output_path = process_aware_settings.get_output_path("images/productos")
+            output_path = process_aware_settings.get_output_path('images/productos')
             logger.info(f"Directorio de salida: {output_path}")
             if process_logger:
                 process_logger.log_detailed(f"Directorio de salida: {output_path}")
-        
-        # Determinar archivo Excel
+
         excel_file = args.excel_file or downloader.find_latest_excel()
         if not excel_file:
-            logger.error("No se encontró archivo Excel")
+            logger.error('No se encontró archivo Excel')
             if process_logger:
-                process_logger.log_command_result(
-                    "review_images",
-                    "ERROR: No se encontró archivo Excel",
-                    success=False
-                )
+                process_logger.log_command_result('review_images', 'ERROR: No se encontró archivo Excel', success=False)
             return 1
-            
-        logger.info(f"Iniciando descarga de imágenes para revisión desde: {excel_file}")
+
+        logger.info(f'Iniciando descarga de imágenes para revisión desde: {excel_file}')
         if process_logger:
-            process_logger.log_detailed(f"Archivo Excel: {excel_file}")
-        
-        # Ejecutar descarga
+            process_logger.log_detailed(f'Archivo Excel: {excel_file}')
+
         results = downloader.download_review_images(excel_file)
-        
-        # Ya se intenta guardar dentro de download_review_images; evitar doble intento
+
         if downloader.downloaded_images_log:
-            logger.info("(El log de imágenes se guarda durante la ejecución; no se repite para evitar duplicados)")
-        
-        # Mostrar resultados
-        logger.info("=== RESUMEN DE RESULTADOS ===")
+            logger.info('(El log de imágenes se guarda durante la ejecución; no se repite para evitar duplicados)')
+
+        logger.info('=== RESUMEN DE RESULTADOS ===')
         logger.info(f"Referencias procesadas: {results.get('references_processed', 0)}")
         logger.info(f"Devices procesados: {results.get('devices_processed', 0)}")
         logger.info(f"Referencias con revisar_imagenes=si: {len([d for d in results.get('details', []) if d.get('images', 0) > 0])}")
         logger.info(f"Devices con revisar_imagenes=si: {len([d for d in results.get('device_details', []) if d.get('images', 0) > 0])}")
         logger.info(f"Imágenes descargadas: {results.get('total_images', 0)}")
         logger.info(f"Errores: {sum(d.get('errors', 0) for d in results.get('details', []))}")
-        
-        # Log del proceso
+
         if process_logger:
-            process_logger.log_step_completion("Descarga de imágenes para revisión", {
-                "Referencias procesadas": results.get('references_processed', 0),
-                "Devices procesados": results.get('devices_processed', 0),
-                "Referencias marcadas": len([d for d in results.get('details', []) if d.get('images', 0) > 0]),
-                "Devices marcados": len([d for d in results.get('device_details', []) if d.get('images', 0) > 0]),
-                "Imágenes descargadas": results.get('total_images', 0),
-                "Errores": sum(d.get('errors', 0) for d in results.get('details', []))
+            process_logger.log_step_completion('Descarga de imágenes para revisión', {
+                'Referencias procesadas': results.get('references_processed', 0),
+                'Devices procesados': results.get('devices_processed', 0),
+                'Referencias marcadas': len([d for d in results.get('details', []) if d.get('images', 0) > 0]),
+                'Devices marcados': len([d for d in results.get('device_details', []) if d.get('images', 0) > 0]),
+                'Imágenes descargadas': results.get('total_images', 0),
+                'Errores': sum(d.get('errors', 0) for d in results.get('details', []))
             })
-            
             process_logger.log_command_result(
-                "review_images",
+                'review_images',
                 f"Procesadas {results.get('references_processed', 0)} referencias y {results.get('devices_processed', 0)} devices, descargadas {results.get('total_images', 0)} imágenes",
                 success=True
             )
-        
-        # Mostrar información del proceso
+
         if process_info:
             logger.info(f"Proceso: {process_info['name']}")
             process_directory = process_info.get('process_dir') or process_info.get('directory', 'N/A')
             logger.info(f"Directorio: {process_directory}")
-        
-        logger.info("Proceso completado exitosamente")
+
+        logger.info('Proceso completado exitosamente')
         return 0
-        
     except Exception as e:
-        print(f"Error en descarga de imágenes: {e}")
-        import traceback
+        logger.error(f"Error en descarga de imágenes: {e}")
         if args.verbose:
+            import traceback
             traceback.print_exc()
         return 1
 
@@ -862,8 +853,9 @@ def main():
     """Función principal del CLI"""
     raw_args = sys.argv[1:]
 
-    # 1. Pre-scan de --env ANTES de crear el parser para que Settings() lea ya el .env correcto
+    # 1. Pre-scan de --env y --env-file ANTES de crear el parser para que Settings() lea ya el .env correcto
     env_value = None
+    env_file_value = None
     pre_clean_args = []
     skip_next = False
     for i, a in enumerate(raw_args):
@@ -876,27 +868,45 @@ def main():
                 skip_next = True
             else:
                 print("⚠ --env indicado sin valor; ignorando")
+        elif a == '--env-file':
+            if i + 1 < len(raw_args):
+                env_file_value = raw_args[i + 1].strip().strip('"').strip("'")
+                skip_next = True
+            else:
+                print("⚠ --env-file indicado sin valor; ignorando")
         else:
             pre_clean_args.append(a)
 
     # 2. Cargar archivo .env específico con override=True para que realmente cambie valores previos
     try:
         from dotenv import load_dotenv
-        env_file = '.env'
-        if env_value:
-            candidate = f".env_{env_value}"
-            if os.path.exists(candidate):
-                env_file = candidate
+        env_file = None
+        # Prioridad: --env-file > --env > .env
+        if env_file_value:
+            # Expandir y validar ruta
+            potential = os.path.abspath(env_file_value)
+            if not os.path.exists(potential):
+                print(f"⚠ --env-file '{potential}' no existe; se intentará fallback a --env/.env")
             else:
-                print(f"⚠ No existe {candidate}; usando {env_file}")
-        # Limpiar variables ELASTIC_* y DB_* previas para evitar fugas entre entornos
+                env_file = potential
+        if env_file is None:
+            env_file = '.env'
+            if env_value:
+                candidate = f".env_{env_value}"
+                if os.path.exists(candidate):
+                    env_file = candidate
+                else:
+                    print(f"⚠ No existe {candidate}; usando {env_file}")
+        # Limpiar variables previas sensibles para evitar fugas entre entornos
         for k in list(os.environ.keys()):
-            if k.startswith('ELASTIC_') or k.startswith('DB_PROD_RO_'):
+            if k.startswith(('ELASTIC_', 'DB_PROD_RO_', 'REMOTE_STORAGE_', 'MINIO_', 'S3_BUCKET')):
                 # No eliminar si el nuevo .env no define nada (las que se necesiten se volverán a poner)
                 os.environ.pop(k, None)
         load_dotenv(env_file, override=True)
         if env_value:
             os.environ['DM_ACTIVE_ENV'] = env_value
+        if env_file:
+            os.environ['DM_ACTIVE_ENV_FILE'] = os.path.abspath(env_file)
     except Exception as _e:
         print(f"Aviso: no se pudo cargar variables de entorno ({_e})")
 
@@ -905,6 +915,9 @@ def main():
 
     # 4. Reconstruir args para incluir --env (solo para que aparezca en args si el usuario lo pasó)
     cleaned_args = pre_clean_args
+    # Reconstruir para parser (solo para mantener en args)
+    if env_file_value:
+        cleaned_args = ['--env-file', env_file_value] + cleaned_args
     if env_value:
         cleaned_args = ['--env', env_value] + cleaned_args
 

@@ -12,7 +12,6 @@ import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import yaml
-import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import requests
 from urllib.parse import urlparse
@@ -64,11 +63,20 @@ class ImageReviewDownloader:
         self.clear_output_folder = self.config.get('clear_output_folder', True)
         self.tipo_imagenes_bajar = self.config.get('tipo_imagenes_bajar', 'clase_y_similares')
 
-        # S3 / credenciales
-        self.s3_bucket = os.getenv('S3_BUCKET') or self.config.get('s3_bucket', 'grabit-data')
-        self.s3_region = os.getenv('REMOTE_STORAGE_REGION') or self.config.get('s3_region', 'eu-west-2')
-        self.aws_access_key_id = os.getenv('REMOTE_STORAGE_ACCESS_KEY')
-        self.aws_secret_access_key = os.getenv('REMOTE_STORAGE_SECRET_KEY')
+        # Cliente de almacenamiento compartido
+        try:
+            from dataset_manager.storage.storage_client import get_storage_client
+            self.s3_client, storage_env = get_storage_client(self.logger, validate=True)
+            self.s3_bucket = storage_env.bucket
+            self.s3_region = storage_env.region
+            self.storage_type = storage_env.storage_type
+            self._storage_env = storage_env
+        except Exception as e:
+            self.logger.warning(f"Fallo inicializando cliente de almacenamiento compartido: {e}. Se intentará inicialización específica mínima.")
+            self.s3_client = None
+            self.s3_bucket = os.getenv('S3_BUCKET', 'grabit-data')
+            self.s3_region = os.getenv('REMOTE_STORAGE_REGION', 'eu-west-2')
+            self.storage_type = 's3'
 
         self.download_timeout = self.config.get('download_timeout', 30)
         self.max_retries = self.config.get('max_retries', 3)
@@ -80,8 +88,9 @@ class ImageReviewDownloader:
         self.last_log_save_status = None
         self.last_log_save_error = None
 
-        # Init S3 client
-        self._init_s3_client()
+        # Si no se obtuvo cliente, intentar inicialización directa legacy
+        if self.s3_client is None:
+            self._init_s3_client()
         os.makedirs(self.carpeta_destino, exist_ok=True)
 
         self.logger.info("ImageReviewDownloader inicializado:")
@@ -92,29 +101,15 @@ class ImageReviewDownloader:
         self.logger.info(f"  - S3 Region: {self.s3_region}")
 
     def _init_s3_client(self):
-        """
-        Inicializar cliente de S3 con credenciales
-        """
+        """Legacy fallback initialisation if shared client creation failed."""
         try:
-            # Usar credenciales de variables de entorno (cargadas del .env)
-            if self.aws_access_key_id and self.aws_secret_access_key:
-                self.s3_client = boto3.client(
-                    's3',
-                    region_name=self.s3_region,
-                    aws_access_key_id=self.aws_access_key_id,
-                    aws_secret_access_key=self.aws_secret_access_key
-                )
-                self.logger.info("Cliente S3 inicializado con credenciales del .env")
-            else:
-                # Fallback: usar credenciales por defecto (AWS CLI, IAM roles)
-                self.s3_client = boto3.client('s3', region_name=self.s3_region)
-                self.logger.info("Cliente S3 inicializado con credenciales por defecto")
-                
-        except NoCredentialsError:
-            self.logger.error("No se encontraron credenciales de AWS")
-            self.s3_client = None
+            from dataset_manager.storage.storage_client import get_storage_client
+            self.s3_client, storage_env = get_storage_client(self.logger, validate=False)
+            self.s3_bucket = storage_env.bucket
+            self.s3_region = storage_env.region
+            self.storage_type = storage_env.storage_type
         except Exception as e:
-            self.logger.error(f"Error inicializando cliente S3: {e}")
+            self.logger.error(f"Error inicializando cliente de almacenamiento: {e}")
             self.s3_client = None
 
     def find_latest_excel(self) -> Optional[str]:

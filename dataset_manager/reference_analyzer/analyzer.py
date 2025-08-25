@@ -591,7 +591,7 @@ class ReferenceAnalyzer:
             self.logger.error(f"Error enriqueciendo referencias con modelo: {str(e)}")
             raise
 
-    def enrich_references_with_elastic(self, references_df: pd.DataFrame, elastic_df: pd.DataFrame, labels_data: pd.DataFrame = None) -> pd.DataFrame:
+    def enrich_references_with_elastic(self, references_df: pd.DataFrame, elastic_df: pd.DataFrame, labels_data: pd.DataFrame = None, model_id: int = None) -> pd.DataFrame:
         """
         Enriquece TODAS las referencias con estadísticas de Elasticsearch
         Incluye análisis de top 3 result_index más frecuentes
@@ -703,20 +703,24 @@ class ReferenceAnalyzer:
                             trained_percentage = client_trained / total_client
                             enriched_df.at[idx, 'is_trained_elastic'] = trained_percentage >= 0.5
                             
-                            # Calcular porcentajes de acierto SOLO con transacciones de cliente
-                            # %Ok del sistema (basado en columna 'Ok')
-                            if 'Ok' in client_trans.columns:
-                                ok_sistema_count = (client_trans['Ok'] == 1).sum()
-                                pct_ok_sistema = (ok_sistema_count / total_client * 100)
-                                enriched_df.at[idx, 'pct_ok_sistema'] = round(pct_ok_sistema, 2)
-                            
-                            # %Ok del modelo (solo sobre transacciones entrenadas)
-                            if 'Ok_modelo' in client_trans.columns and 'selected_reference_is_trained' in client_trans.columns:
-                                trained_subset = client_trans[client_trans['selected_reference_is_trained'] == True]
-                                if len(trained_subset) > 0:
-                                    ok_modelo_count = (trained_subset['Ok_modelo'] == 1).sum()
-                                    pct_ok_modelo = (ok_modelo_count / len(trained_subset) * 100)
-                                    enriched_df.at[idx, 'pct_ok_modelo'] = round(pct_ok_modelo, 2)
+                            # Filtrar para cálculos de indicadores solo transacciones del modelo activo (si se proporciona model_id)
+                            indicator_client_trans = client_trans
+                            if model_id is not None and 'model_id' in indicator_client_trans.columns:
+                                indicator_client_trans = indicator_client_trans[indicator_client_trans['model_id'] == model_id]
+                        
+                            # Calcular porcentajes de acierto SOLO con transacciones de cliente DEL MODELO
+                            if not indicator_client_trans.empty:
+                                if 'Ok' in indicator_client_trans.columns:
+                                    ok_sistema_count = (indicator_client_trans['Ok'] == 1).sum()
+                                    pct_ok_sistema = (ok_sistema_count / len(indicator_client_trans) * 100)
+                                    enriched_df.at[idx, 'pct_ok_sistema'] = round(pct_ok_sistema, 2)
+                                # %Ok del modelo (solo sobre transacciones entrenadas del modelo)
+                                if 'Ok_modelo' in indicator_client_trans.columns and 'selected_reference_is_trained' in indicator_client_trans.columns:
+                                    trained_subset = indicator_client_trans[indicator_client_trans['selected_reference_is_trained'] == True]
+                                    if len(trained_subset) > 0:
+                                        ok_modelo_count = (trained_subset['Ok_modelo'] == 1).sum()
+                                        pct_ok_modelo = (ok_modelo_count / len(trained_subset) * 100)
+                                        enriched_df.at[idx, 'pct_ok_modelo'] = round(pct_ok_modelo, 2)
                             
                             # Calcular top 3 result_index más frecuentes
                             self.logger.debug(f"Calculando top 3 result_index para referencia {reference_code}")
@@ -839,7 +843,12 @@ class ReferenceAnalyzer:
             enriched_refs = self.enrich_references_with_model(enriched_refs, model_data)
             
             # Paso 3: Enriquecer con estadísticas de Elasticsearch
-            enriched_refs = self.enrich_references_with_elastic(enriched_refs, elastic_df, labels_data)
+            # model_id para indicadores
+            model_id_for_indicators = None
+            active_model_info = extracted_data.get('active_model_info') or {}
+            if active_model_info:
+                model_id_for_indicators = active_model_info.get('model_id')
+            enriched_refs = self.enrich_references_with_elastic(enriched_refs, elastic_df, labels_data, model_id=model_id_for_indicators)
             
             # Filtrar referencias que aparecen en Elasticsearch para compatibilidad
             if elastic_df is not None and not elastic_df.empty:
@@ -875,7 +884,7 @@ class ReferenceAnalyzer:
             results['summary_stats'] = summary_stats
             
             # Análisis de devices
-            devices_analysis = self.analyze_devices(elastic_df, labels_data)
+            devices_analysis = self.analyze_devices(elastic_df, labels_data, model_id=model_id_for_indicators)
             results['devices_analysis'] = devices_analysis
             
             self.logger.info("Análisis completo finalizado exitosamente")
@@ -885,7 +894,7 @@ class ReferenceAnalyzer:
             self.logger.error(f"Error en análisis completo: {str(e)}")
             raise
 
-    def analyze_devices(self, elastic_df: pd.DataFrame, labels_data: pd.DataFrame = None) -> pd.DataFrame:
+    def analyze_devices(self, elastic_df: pd.DataFrame, labels_data: pd.DataFrame = None, model_id: int = None) -> pd.DataFrame:
         """
         Analiza las estadísticas por device_id
         
@@ -923,19 +932,18 @@ class ReferenceAnalyzer:
                 num_cliente = len(client_data)
                 num_manual = len(manual_data)
                 
-                # Calcular %Ok para transacciones de cliente
+                # Calcular %Ok solo sobre transacciones del modelo si se dispone de model_id
                 pct_ok_sistema = 0.0
-                if num_cliente > 0:
-                    ok_count = len(client_data[client_data['Ok'] == True])
-                    pct_ok_sistema = (ok_count / num_cliente) * 100
-                
-                # Calcular %Ok_modelo solo para referencias entrenadas
                 pct_ok_modelo = 0.0
-                if num_cliente > 0:
-                    # Para %ok_modelo, usar solo transacciones donde selected_reference_is_trained es True
-                    if 'selected_reference_is_trained' in client_data.columns:
-                        trained_transactions = client_data[client_data['selected_reference_is_trained'] == True]
-                        
+                model_client_data = client_data
+                if model_id is not None and 'model_id' in client_data.columns:
+                    model_client_data = client_data[client_data['model_id'] == model_id]
+                if len(model_client_data) > 0:
+                    if 'Ok' in model_client_data.columns:
+                        ok_count = len(model_client_data[model_client_data['Ok'] == True])
+                        pct_ok_sistema = (ok_count / len(model_client_data)) * 100
+                    if 'selected_reference_is_trained' in model_client_data.columns:
+                        trained_transactions = model_client_data[model_client_data['selected_reference_is_trained'] == True]
                         if len(trained_transactions) > 0 and 'Ok_modelo' in trained_transactions.columns:
                             ok_modelo_count = len(trained_transactions[trained_transactions['Ok_modelo'] == True])
                             pct_ok_modelo = (ok_modelo_count / len(trained_transactions)) * 100

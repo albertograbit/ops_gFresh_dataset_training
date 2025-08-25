@@ -502,11 +502,12 @@ class DataExtractor:
             # Configurar conexiones
             self.setup_connections()
             
-            # Gestionar el model_id según la lógica especificada
+            # Resolver model_id (solo para indicadores / modelo activo) pero NO filtrar extracción
             resolved_model_id = self._resolve_model_id(deployment_id, model_id)
             
-            # Extraer datos de Elasticsearch con el model_id resuelto
-            elastic_df = self.extract_elasticsearch_data(deployment_id, days_back, resolved_model_id)
+            # Extraer TODOS los datos de Elasticsearch del deployment sin filtrar por modelo
+            # (los indicadores %OK se calcularán luego solo sobre las transacciones del modelo)
+            elastic_df = self.extract_elasticsearch_data(deployment_id, days_back, None)
             
             # Añadir columnas de información de imágenes a los datos de Elasticsearch
             if not elastic_df.empty and 'transaction_id' in elastic_df.columns:
@@ -569,7 +570,7 @@ class DataExtractor:
                     'deployment_id': deployment_id,
                     'days_back': days_back,
                     'base_model_id': base_model_id,
-                    'model_used': model_to_use,
+                    'model_used': model_to_use,  # model_id usado para indicadores (%OK, etc.)
                     'is_base_model': active_model_info.get('is_base_model', False) if active_model_info else False,
                     'extraction_timestamp': datetime.now().isoformat(),
                     'total_elastic_records': len(elastic_df),
